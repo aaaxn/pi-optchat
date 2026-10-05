@@ -12,7 +12,8 @@ export interface RunInfo {
   id: string; task: string; cwd: string; model: string; thinking: string;
   parentSession: string; sessionFile?: string; started: number; ended?: number;
   state: RunState; report?: string;
-  guidance: { text: string; date: number; state: 'queued' | 'delivered' | 'undelivered' }[];
+  /** `from` is missing on runs saved before senders were recorded. */
+  guidance: { text: string; date: number; state: 'queued' | 'delivered' | 'undelivered'; from?: 'user' | 'manager' }[];
 }
 export const isActiveRun = (run: RunInfo) => run.state === 'running' || run.state === 'stopping';
 function isRun(value: unknown): value is RunInfo {
@@ -22,7 +23,7 @@ function isRun(value: unknown): value is RunInfo {
     && (value.ended === undefined || typeof value.ended === 'number')
     && (value.sessionFile === undefined || typeof value.sessionFile === 'string')
     && (value.report === undefined || typeof value.report === 'string')
-    && Array.isArray(value.guidance) && value.guidance.every(g => record(g) && typeof g.text === 'string' && typeof g.date === 'number' && ['queued', 'delivered', 'undelivered'].includes(String(g.state)));
+    && Array.isArray(value.guidance) && value.guidance.every(g => record(g) && typeof g.text === 'string' && typeof g.date === 'number' && ['queued', 'delivered', 'undelivered'].includes(String(g.state)) && (g.from === undefined || g.from === 'user' || g.from === 'manager'));
 }
 export function sessionMessages(file: string): AgentMessage[] {
   return SessionManager.open(file).getEntries().flatMap(e => e.type === 'message' ? [e.message] : []);

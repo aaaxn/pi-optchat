@@ -11,15 +11,6 @@ That upstream text is credited to Victor Taelin and is not relicensed by this
 repository's MIT grant for original implementation code. The complete recipe
 is linked upstream. This project is an independent Pi extension.
 
-## pi-web-access
-
-Web functionality is provided by `pi-web-access` by Nico Bailon, distributed
-under the MIT license:
-
-https://github.com/nicobailon/pi-web-access
-
-Its license and its dependencies' notices are retained in the bundled package.
-
 ## Pi
 
 The extension uses Pi's host-provided SDK packages. Pi is distributed under the

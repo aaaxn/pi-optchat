@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
@@ -11,6 +11,9 @@ import { RunHistory } from '../src/runs.ts';
 import { emptyUsage, UsageLedger } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
 import { SUBAGENT, VIEW_DOC } from '../src/prompts.ts';
+
+// Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 
 async function until(condition: () => boolean) {
   const deadline = Date.now() + 10000;
@@ -28,7 +31,7 @@ test('real SDK children stream, report once per spawn, acknowledge steering, sto
     models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 }, contextWindow: 100000, maxTokens: 1000 }],
     streamSimple(model, context, options) {
       const stream = createAssistantMessageEventStream();
-      for (const m of context.messages) if (m.role === 'system') systemPrompts.add(textContent(m.content));
+      for (const m of context.messages) if (m.role === 'system') systemPrompts.add([textContent(m.content), ...Object.values('sections' in m ? m.sections ?? {} : {})].join('\n'));
       const initial = textContent(context.messages.find(m => m.role === 'user')?.content);
       const task = initial.split('Your task:\n').at(-1) ?? '';
       const guided = context.messages.some(m => m.role === 'user' && textContent(m.content) === 'Please include tests.');
@@ -54,7 +57,7 @@ test('real SDK children stream, report once per spawn, acknowledge steering, sto
     async text => { reports.push(text); }, text => warnings.push(text), dir,
     { usage, parentSession: 'parent-session', createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   try {
-    const [slow, fast, stopped] = await children.spawn(['slow', 'fast', 'stop-me'], dir);
+    const [slow, fast, stopped] = await children.spawn([{ task: 'slow' }, { task: 'fast' }, { task: 'stop-me' }], dir);
     await until(() => releases.size === 3);
     await until(() => !!children.live(slow)?.streaming);
     assert.ok(JSON.stringify(children.messages(slow)).includes('Working on slow'));
@@ -85,14 +88,14 @@ test('real SDK children stream, report once per spawn, acknowledge steering, sto
     assert.equal(new RunHistory(join(dir, 'other-profile')).list().length, 0);
     await restored.close();
 
-    const [first] = await children.spawn(['first'], dir);
-    const [second] = await children.spawn(['second'], dir);
+    const [first] = await children.spawn([{ task: 'first' }], dir);
+    const [second] = await children.spawn([{ task: 'second' }], dir);
     await until(() => releases.has('first') && releases.has('second'));
     for (const id of [first, second]) {
       const tools = children.live(id)!.session.getActiveToolNames();
       assert.ok(tools.includes('zoom') && !tools.includes('spawn') && !tools.includes('tell'), 'subagents get zoom and date, not spawn');
     }
-    await assert.rejects(children.spawn(Array.from({ length: 7 }, () => 'too-many'), dir), /8 active agents/);
+    await assert.rejects(children.spawn(Array.from({ length: 7 }, () => ({ task: 'too-many' })), dir), /8 active agents/);
     children.live(second)!.session.dispose = () => { throw new Error('dispose failed'); };
     releases.get('second')!();
     await until(() => reports.length === 2);
@@ -100,7 +103,105 @@ test('real SDK children stream, report once per spawn, acknowledge steering, sto
     releases.get('first')!();
     await until(() => !children.active);
     assert.equal(reports[2], `[${first}] Working on first`);
-    assert.deepEqual([...systemPrompts], [`${SUBAGENT}\n\n${VIEW_DOC}\n\nProfile instructions.`], 'the child prompt is the recipe\'s, unchanged');
+    assert.equal(systemPrompts.size, 1, 'every child call sends the same system prompt');
+    const [system] = systemPrompts;
+    assert.ok(system.includes(`${SUBAGENT}\n\n${VIEW_DOC}`) && system.includes('Profile instructions.'), 'the recipe preamble and the profile instructions reach the child');
     assert.deepEqual(warnings, ['Subagent cleanup failed: Error: dispose failed'], 'a failed cleanup must not drop the report');
+  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('children get the main agent\'s extensions, AGENTS.md files and skills, but never another copy of OptChat', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-extensions-'));
+  const agentDir = process.env.PI_CODING_AGENT_DIR ?? '';
+  const tool = (name: string) => `export default (pi) => pi.registerTool({ name: '${name}', label: '${name}', description: '${name}', parameters: { type: 'object', properties: {} }, execute: async () => ({ content: [], details: {} }) });\n`;
+  mkdirSync(join(agentDir, 'extensions'), { recursive: true });
+  writeFileSync(join(agentDir, 'extensions', 'web.js'), tool('installed_web'));
+  const copy = join(dir, 'optchat-copy');
+  mkdirSync(join(copy, 'src'), { recursive: true });
+  writeFileSync(join(copy, 'package.json'), JSON.stringify({ name: 'pi-optchat', type: 'module', pi: { extensions: ['./src/index.js'] } }));
+  writeFileSync(join(copy, 'src', 'index.js'), tool('optchat_copy'));
+  writeFileSync(join(agentDir, 'settings.json'), JSON.stringify({ packages: [copy] }));
+  // The main chat runs elsewhere; the task names the project, whose AGENTS.md must still load.
+  const project = join(dir, 'project'), home = join(dir, 'home');
+  mkdirSync(project); mkdirSync(home);
+  writeFileSync(join(project, 'AGENTS.md'), 'REPO_RULES');
+  writeFileSync(join(agentDir, 'AGENTS.md'), 'GLOBAL_RULES');
+  mkdirSync(join(agentDir, 'skills', 'demo-skill'), { recursive: true });
+  writeFileSync(join(agentDir, 'skills', 'demo-skill', 'SKILL.md'), '---\nname: demo-skill\ndescription: Demo skill.\n---\nBody');
+  let system = '';
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple: (model, context) => {
+      const head = context.messages.find(m => m.role === 'system');
+      system = Object.values(head && 'sections' in head ? head.sections ?? {} : {}).join('\n');
+      const stream = createAssistantMessageEventStream();
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
+      queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
+      return stream;
+    },
+  });
+  const children = new Children(new Memory(dir, async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => 'PROFILE_RULES',
+    async () => {}, () => {}, dir, { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  try {
+    await assert.rejects(children.spawn([{ task: 'nowhere', cwd: join(dir, 'missing') }], home), /No such directory/);
+    const [id] = await children.spawn([{ task: 'inspect tools', cwd: project }], home);
+    assert.equal(children.live(id)?.info.cwd, project);
+    const names = children.live(id)?.session.getAllTools().map(t => t.name) ?? [];
+    assert.ok(names.includes('installed_web'), 'installed extensions reach the child');
+    assert.ok(!names.includes('optchat_copy'), 'OptChat must not load inside its own children');
+    await until(() => !children.active);
+    assert.ok(system.includes('demo-skill'), 'skills are listed like in the main agent');
+    const order = ['GLOBAL_RULES', 'REPO_RULES', 'PROFILE_RULES'].map(rule => system.lastIndexOf(rule));
+    assert.ok(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])), 'global, then repo AGENTS.md, then profile instructions last');
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(join(agentDir, 'settings.json'), { force: true }); rmSync(join(agentDir, 'AGENTS.md'), { force: true }); rmSync(join(agentDir, 'extensions'), { recursive: true, force: true }); rmSync(join(agentDir, 'skills'), { recursive: true, force: true }); }
+});
+
+test('a child can message the main agent mid-run', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-tell-parent-'));
+  const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
+  const reports: string[] = [], warnings: string[] = [], releases = new Map<string, () => void>();
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple(model, context, options) {
+      const stream = createAssistantMessageEventStream();
+      const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
+      const last = context.messages.at(-1), lastText = textContent(last && 'content' in last ? last.content : '');
+      const first = context.messages.filter(m => m.role === 'assistant').length === 0;
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: last?.role === 'toolResult' ? 'asked' : first ? `${task} working` : `${task} heard: ${lastText}` }],
+        api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+      if (first && task.startsWith('asker')) {
+        message.content = [{ type: 'toolCall', id: `ask-${task}`, name: 'tell_parent', arguments: { message: `question from ${task}` } }];
+        message.stopReason = 'toolUse';
+      }
+      void (async () => {
+        stream.push({ type: 'start', partial: message });
+        // Hold each child's first turn.
+        const gate = first ? task : undefined;
+        if (gate) await new Promise<void>(resolve => {
+          releases.set(gate, resolve); options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+          if (options?.signal?.aborted) resolve();
+        });
+        stream.push({ type: 'done', reason: message.stopReason === 'toolUse' ? 'toolUse' : 'stop', message });
+        stream.end();
+      })();
+      return stream;
+    },
+  });
+  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
+    async text => { reports.push(text); }, text => warnings.push(text), dir, { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  try {
+    // Top-level child: the message reaches the main agent before the final report.
+    const [top] = await children.spawn([{ task: 'asker-top' }], dir);
+    await until(() => releases.has('asker-top'));
+    assert.ok(children.live(top)?.session.getActiveToolNames().includes('tell_parent'));
+    releases.get('asker-top')!();
+    await until(() => !children.active);
+    assert.deepEqual(reports, [`[${top}] Message from subagent (still running): question from asker-top`, `[${top}] asked`]);
+
+    assert.deepEqual(warnings, []);
   } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });

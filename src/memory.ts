@@ -6,7 +6,7 @@ export const NODE = 512;
 export const VIEW = 128_000;
 export const CAP = 30_000;
 export type Kind = 'user' | 'talk' | 'tool' | 'echo' | 'note';
-export interface Origin { source: 'claude' | 'codex' | 'chatgpt'; conversation: string; message: string; title: string; project?: string }
+export interface Origin { source: 'claude' | 'claude-memory' | 'codex' | 'chatgpt'; conversation: string; message: string; title: string; project?: string }
 export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string; origin?: Origin }
 export interface Part { l: number; i: number }
 export interface Summary extends Part { text: string; size: number }

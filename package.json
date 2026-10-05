@@ -1,20 +1,16 @@
 {
   "name": "pi-optchat",
-  "version": "0.4.0",
+  "version": "0.6.3",
   "type": "module",
   "pi": {
     "extensions": [
-      "./src/index.ts",
-      "./node_modules/pi-web-access/dist"
+      "./src/index.ts"
     ]
   },
   "scripts": {
     "check": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
     "test:live": "tsx test/live.ts"
-  },
-  "dependencies": {
-    "pi-web-access": "0.35.0"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "1.0.2",
@@ -56,12 +52,9 @@
   },
   "files": [
     "src",
-    "docs",
+    "docs/*.md",
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"
-  ],
-  "bundleDependencies": [
-    "pi-web-access"
   ]
 }
