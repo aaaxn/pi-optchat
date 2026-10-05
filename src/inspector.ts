@@ -86,7 +86,7 @@ export class Inspector implements Component, Focusable {
         this.range = ranges[(ranges.indexOf(this.range) + delta + ranges.length) % ranges.length]; this.scroll = 0;
       } else this.scrollInput(data);
     } else if (this.opened) {
-      if (data === 's' && !this.busy && ['running', 'waiting'].includes(this.options.children.live(this.opened)?.info.state ?? '')) {
+      if (data === 's' && !this.busy && this.options.children.live(this.opened)?.info.state === 'running') {
         this.composer = new Input({ prompt: 'Message: ', placeholder: 'guidance for this child' }); this.composer.focused = this.focused;
       } else if (data === 'x' && !this.busy && this.options.children.live(this.opened)) {
         const id = this.opened; void this.act(() => this.options.children.stop(id));
@@ -128,7 +128,7 @@ export class Inspector implements Component, Focusable {
     }
     const messages = this.savedMessages ?? [];
     const usage = summarizeUsage(this.options.usage.entries.filter(e => e.runId === run.id)).total;
-    const blocks = [`Task: ${run.task}`, `Directory: ${run.cwd}`, `Model: ${run.model} · effort ${run.thinking}`, `Depth: ${run.depth}/3 · parent: ${run.parentId ?? 'main agent'}`,
+    const blocks = [`Task: ${run.task}`, `Directory: ${run.cwd}`, `Model: ${run.model} · effort ${run.thinking}`,
       `Usage: ${count(usage.totalTokens)} tokens · ${count(usage.input)} input · ${count(usage.output)} output · ${count(usage.cacheRead)}/${count(usage.cacheWrite)} cache read/write · $${usage.cost.total.toFixed(4)} API-equivalent`];
     let initialUser = true;
     for (const message of messages) {
@@ -199,8 +199,8 @@ export class Inspector implements Component, Focusable {
       if (cursor >= this.top + this.height) this.top = cursor - this.height + 1;
       body = list.slice(this.top, this.top + this.height).map(run => {
         const live = children.live(run.id), tools = live ? [...live.tools.values()].map(t => t.name).join(', ') : '';
-        const activity = live ? `${run.state === 'stopping' ? 'stopping' : run.state === 'waiting' ? 'waiting for children' : tools || (live.streaming ? 'responding' : 'working')} · last activity ${elapsed(Date.now() - live.updated)} ago` : run.state;
-        const label = `${run.id === this.selected ? '→' : ' '} ${'  '.repeat(run.depth - 1)}${run.parentId ? '↳ ' : ''}${oneLine(run.task).slice(0, 55)} · ${activity} · ${elapsed((run.ended ?? Date.now()) - run.started)}`;
+        const activity = live ? `${run.state === 'stopping' ? 'stopping' : tools || (live.streaming ? 'responding' : 'working')} · last activity ${elapsed(Date.now() - live.updated)} ago` : run.state;
+        const label = `${run.id === this.selected ? '→' : ' '} ${oneLine(run.task).slice(0, 55)} · ${activity} · ${elapsed((run.ended ?? Date.now()) - run.started)}`;
         return run.id === this.selected ? color('accent', label) : label;
       });
       if (!body.length) body.push('No agents yet. Ask the main agent to delegate a task.');

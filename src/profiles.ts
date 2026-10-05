@@ -57,9 +57,9 @@ export function rememberProfile(name: string) { atomicWrite(join(dataHome(), 'la
 export class ProfileBusyError extends Error {
   constructor(readonly owner: string) { super(`Profile already running: ${owner}`); }
 }
-export function profileSocket(dir: string, purpose: 'lock' | 'windows' = 'lock') {
+export function profileSocket(dir: string) {
   const hash = createHash('sha256').update(dir).digest('hex').slice(0, 24);
-  return join(tmpdir(), `pi-optchat-${process.getuid?.() ?? 'user'}-${hash}${purpose === 'lock' ? '' : '-windows'}.sock`);
+  return join(tmpdir(), `pi-optchat-${process.getuid?.() ?? 'user'}-${hash}.sock`);
 }
 
 /** OS-owned socket lifetime, no timeout-based stealing of a busy profile. */

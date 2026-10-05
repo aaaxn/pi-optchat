@@ -22,7 +22,7 @@ test('inspector reaches old runs, preserves selection on return, scrolls transcr
   session.appendMessage({ role: 'assistant', api: 'anthropic-messages', provider: 'test', model: 'test', stopReason: 'stop', timestamp: 2, usage: emptyUsage(),
     content: [{ type: 'thinking', thinking: 'hidden reasoning' }, { type: 'text', text: Array.from({ length: 100 }, (_, i) => `Transcript line ${i}`).join('\n') }] });
   for (let i = 0; i < 100; i++) children.history.records.set(`run-${i}`, { id: `run-${i}`, task: `Task ${i} ${'long title '.repeat(20)}`, cwd: dir, model: 'test', thinking: 'high',
-    parentSession: 'parent', depth: 1, sessionFile: session.getSessionFile(), started: 1000 - i, ended: 2000, state: 'completed', guidance: [] });
+    parentSession: 'parent', sessionFile: session.getSessionFile(), started: 1000 - i, ended: 2000, state: 'completed', guidance: [] });
   let rows = 24, finished = 0;
   const inspector = new Inspector({ profile: 'personal', session: 'parent', children, usage, page: 'agents', rows: () => rows, redraw: () => {}, done: () => { finished++; }, color: (_tone, text) => text, context: () => 123, signal: controller.signal });
   try {
@@ -52,7 +52,7 @@ test('unfinished persisted runs recover as interrupted with undelivered guidance
   const dir = mkdtempSync(join(tmpdir(), 'optchat-run-history-'));
   try {
     const history = new RunHistory(dir);
-    history.save({ id: 'interrupted', task: 'work', cwd: dir, model: 'test', thinking: 'high', parentSession: 'parent', depth: 1, started: 1, state: 'running',
+    history.save({ id: 'interrupted', task: 'work', cwd: dir, model: 'test', thinking: 'high', parentSession: 'parent', started: 1, state: 'running',
       guidance: [{ text: 'additional task', date: 2, state: 'queued' }] });
     const restored = new RunHistory(dir).records.get('interrupted');
     assert.equal(restored?.state, 'interrupted');
