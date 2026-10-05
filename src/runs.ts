@@ -6,19 +6,15 @@ import { atomicWrite } from './profiles.ts';
 import { record } from './cache.ts';
 import { textContent } from './transcript.ts';
 
-export const runStates = ['running', 'waiting', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'] as const;
+export const runStates = ['running', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'] as const;
 export type RunState = typeof runStates[number];
-export type FinishReason = 'complete' | 'disconnected' | 'owner-stopped' | 'failed';
 export interface RunInfo {
   id: string; task: string; cwd: string; model: string; thinking: string;
   parentSession: string; sessionFile?: string; started: number; ended?: number;
-  parentId?: string; depth: number;
   state: RunState; report?: string;
-  connected?: boolean;
-  handoff?: { reason: FinishReason; text?: string; delivered?: boolean };
   guidance: { text: string; date: number; state: 'queued' | 'delivered' | 'undelivered' }[];
 }
-export const isActiveRun = (run: RunInfo) => run.state === 'running' || run.state === 'waiting' || run.state === 'stopping';
+export const isActiveRun = (run: RunInfo) => run.state === 'running' || run.state === 'stopping';
 function isRun(value: unknown): value is RunInfo {
   return record(value) && ['id', 'task', 'cwd', 'model', 'thinking', 'parentSession'].every(k => typeof value[k] === 'string')
     && typeof value.id === 'string' && /^[a-zA-Z0-9-]+$/.test(value.id)
@@ -26,12 +22,6 @@ function isRun(value: unknown): value is RunInfo {
     && (value.ended === undefined || typeof value.ended === 'number')
     && (value.sessionFile === undefined || typeof value.sessionFile === 'string')
     && (value.report === undefined || typeof value.report === 'string')
-    && (value.connected === undefined || typeof value.connected === 'boolean')
-    && (value.handoff === undefined || record(value.handoff) && ['complete', 'disconnected', 'owner-stopped', 'failed'].includes(String(value.handoff.reason))
-      && (value.handoff.text === undefined || typeof value.handoff.text === 'string')
-      && (value.handoff.delivered === undefined || typeof value.handoff.delivered === 'boolean'))
-    && typeof value.depth === 'number' && Number.isInteger(value.depth) && value.depth >= 1 && value.depth <= 3
-    && (value.parentId === undefined || typeof value.parentId === 'string')
     && Array.isArray(value.guidance) && value.guidance.every(g => record(g) && typeof g.text === 'string' && typeof g.date === 'number' && ['queued', 'delivered', 'undelivered'].includes(String(g.state)));
 }
 export function sessionMessages(file: string): AgentMessage[] {
@@ -49,13 +39,11 @@ export class RunHistory {
     for (const file of files.filter(f => f.endsWith('.optchat.json'))) {
       try {
         const run: unknown = JSON.parse(readFileSync(join(this.directory, file), 'utf8'));
-        if (record(run) && run.depth === undefined) run.depth = 1;
         if (!isRun(run) || file !== `${run.id}.optchat.json`) throw new Error('Invalid metadata');
         // Never follow a stored transcript pointer outside this profile's run directory.
         if (run.sessionFile) run.sessionFile = join(this.directory, basename(run.sessionFile));
         this.records.set(run.id, run);
         if (isActiveRun(run)) {
-          if (run.connected) run.handoff ??= { reason: 'owner-stopped' };
           run.state = 'interrupted'; run.ended = Date.now();
           run.report = 'Pi closed before this agent finished. Its partial transcript is retained.';
           for (const g of run.guidance) if (g.state === 'queued') g.state = 'undelivered';
@@ -73,7 +61,7 @@ export class RunHistory {
         const content = first?.role === 'user' ? textContent(first.content) : 'Historical child session';
         const task = content.includes('\n\nYour task:\n') ? content.split('\n\nYour task:\n').slice(1).join('\n\nYour task:\n') : content;
         const run: RunInfo = { id: manager.getSessionId(), task, cwd: manager.getCwd(), model: last?.role === 'assistant' ? last.model : 'unknown',
-          thinking: 'unknown', parentSession: '', depth: 1, sessionFile: join(this.directory, file), started: first?.timestamp ?? 0,
+          thinking: 'unknown', parentSession: '', sessionFile: join(this.directory, file), started: first?.timestamp ?? 0,
           ended: last?.timestamp, state: last?.role === 'assistant' && last.stopReason === 'stop' ? 'completed' : 'interrupted', guidance: [] };
         this.records.set(run.id, run); this.save(run);
       } catch { this.warnings.push(`Could not read historical child: ${file}`); }
@@ -83,31 +71,7 @@ export class RunHistory {
     atomicWrite(join(this.directory, `${run.id}.optchat.json`), JSON.stringify(run));
     this.records.set(run.id, run);
   }
-  descendants(id: string) {
-    const result: RunInfo[] = [], visited = new Set([id]);
-    const visit = (parent: string) => {
-      for (const run of this.records.values()) {
-        if (run.parentId !== parent || visited.has(run.id)) continue;
-        visited.add(run.id); result.push(run); visit(run.id);
-      }
-    };
-    visit(id);
-    return result;
-  }
   list() {
-    const sorted = [...this.records.values()].sort((a, b) => Number(isActiveRun(b)) - Number(isActiveRun(a)) || b.started - a.started || a.id.localeCompare(b.id));
-    const descendants = new Map<string, RunInfo[]>();
-    for (const run of sorted) if (run.parentId) {
-      const siblings = descendants.get(run.parentId) ?? []; siblings.push(run); descendants.set(run.parentId, siblings);
-    }
-    const result: RunInfo[] = [], visited = new Set<string>();
-    const visit = (run: RunInfo) => {
-      if (visited.has(run.id)) return;
-      visited.add(run.id); result.push(run);
-      for (const child of descendants.get(run.id) ?? []) visit(child);
-    };
-    for (const run of sorted) if (!run.parentId || !this.records.has(run.parentId)) visit(run);
-    for (const run of sorted) visit(run); // Keep even malformed/orphaned old trees visible.
-    return result;
+    return [...this.records.values()].sort((a, b) => Number(isActiveRun(b)) - Number(isActiveRun(a)) || b.started - a.started || a.id.localeCompare(b.id));
   }
 }
