@@ -21,12 +21,13 @@ function darkBackground(theme: Theme) {
 }
 
 /** Background traffic: a dark neutral box with dim text, so it never looks like something the user typed. */
+export function reportBox(text: string, outputPad: number, theme: Theme) {
+  const { label, body } = reportParts(text);
+  const box = new Box(outputPad, 1, darkBackground(theme));
+  box.addChild(new Text(theme.fg('dim', `↳ ${label}`), 0, 0));
+  box.addChild(new Markdown(body.trim(), 0, 0, getMarkdownTheme(), { color: text => theme.fg('muted', text) }));
+  return box;
+}
 export function registerReportRenderer(pi: ExtensionAPI) {
-  pi.registerMessageRenderer(REPORT_TYPE, (message, { outputPad }, theme) => {
-    const { label, body } = reportParts(textContent(message.content));
-    const box = new Box(outputPad, 1, darkBackground(theme));
-    box.addChild(new Text(theme.fg('dim', `↳ ${label}`), 0, 0));
-    box.addChild(new Markdown(body.trim(), 0, 0, getMarkdownTheme(), { color: text => theme.fg('muted', text) }));
-    return box;
-  });
+  pi.registerMessageRenderer(REPORT_TYPE, (message, { outputPad }, theme) => reportBox(textContent(message.content), outputPad, theme));
 }

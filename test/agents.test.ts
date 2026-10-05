@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
-import { Children } from '../src/agents.ts';
+import { Children, taskDirectory } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { RunHistory } from '../src/runs.ts';
 import { emptyUsage, UsageLedger } from '../src/usage.ts';
@@ -204,4 +204,161 @@ test('a child can message the main agent mid-run', async () => {
 
     assert.deepEqual(warnings, []);
   } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a child that fails to clean up still reports, is disposed, and frees its slot', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-cleanup-'));
+  const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
+  const reports: string[] = [], warnings: string[] = [], releases = new Map<string, () => void>();
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple(model, context, options) {
+      const stream = createAssistantMessageEventStream();
+      const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
+      const last = context.messages.at(-1);
+      const first = context.messages.filter(m => m.role === 'assistant').length === 0;
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: first ? `${task} done` : `${task} heard: ${textContent(last && 'content' in last ? last.content : '')}` }],
+        api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+      void (async () => {
+        stream.push({ type: 'start', partial: message });
+        // Hold each first turn so the test can break the child's cleanup before it finishes.
+        if (first) await new Promise<void>(resolve => {
+          releases.set(task, resolve); options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+          if (options?.signal?.aborted) resolve();
+        });
+        stream.push({ type: 'done', reason: 'stop', message });
+        stream.end();
+      })();
+      return stream;
+    },
+  });
+  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
+    async text => { reports.push(text); }, text => warnings.push(text), dir, { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  const breakDispose = (id: string) => {
+    const session = children.live(id)!.session, dispose = session.dispose.bind(session);
+    session.dispose = () => { dispose(); throw new Error('dispose failed'); };
+  };
+  try {
+    // A throwing session_shutdown hook must not skip dispose; a throwing dispose must not drop the report.
+    const [hook, disposal] = await children.spawn([{ task: 'hook' }, { task: 'disposal' }], dir);
+    await until(() => releases.has('hook') && releases.has('disposal'));
+    const hookSession = children.live(hook)!.session, dispose = hookSession.dispose.bind(hookSession);
+    let disposed = false;
+    const emit = hookSession.extensionRunner.emit.bind(hookSession.extensionRunner);
+    hookSession.extensionRunner.emit = (async (event: Parameters<typeof emit>[0]) => {
+      if (event.type === 'session_shutdown') throw new Error('shutdown hook failed');
+      return emit(event);
+    }) as typeof emit;
+    hookSession.dispose = () => { disposed = true; dispose(); };
+    breakDispose(disposal);
+    releases.get('hook')!(); releases.get('disposal')!();
+    await until(() => !children.active);
+    assert.ok(disposed, 'the child is disposed even when its shutdown hook throws');
+    assert.deepEqual(reports, [`[${hook}] hook done\n\n[${disposal}] disposal done`], 'one spawn, one report');
+    for (const id of [hook, disposal]) assert.equal(children.history.records.get(id)?.state, 'completed');
+    assert.equal(children.live(disposal), undefined, 'a failed dispose still frees the agent slot');
+
+    assert.deepEqual(warnings.toSorted(), [
+      'Subagent cleanup failed: Error: dispose failed', 'Subagent cleanup failed: Error: shutdown hook failed',
+    ]);
+  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a batch that fails mid-launch rolls back every launched child even when their cleanup throws', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-rollback-'));
+  const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
+  const warnings: string[] = [], disposed: string[] = [];
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple() { throw new Error('rolled-back children never run'); },
+  });
+  // The first two sessions launch with a dispose that throws; the third cannot be created.
+  let created = 0;
+  const createSession: typeof createAgentSession = async options => {
+    if (++created % 3 === 0) throw new Error('session store unavailable');
+    const made = await createAgentSession({ ...options, modelRuntime: runtime });
+    const label = `session ${created}`, dispose = made.session.dispose.bind(made.session);
+    made.session.dispose = () => { dispose(); disposed.push(label); throw new Error(`${label} dispose failed`); };
+    return made;
+  };
+  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
+    async () => {}, text => warnings.push(text), dir, { createSession });
+  try {
+    await assert.rejects(children.spawn([{ task: 'one' }, { task: 'two' }, { task: 'three' }], dir), /session store unavailable/);
+    assert.deepEqual(disposed, ['session 1', 'session 2'], 'a throwing dispose does not skip the remaining children');
+    const records = [...children.history.records.values()];
+    assert.deepEqual(records.map(r => r.task).toSorted(), ['one', 'two']);
+    for (const record of records) {
+      assert.equal(record.state, 'failed');
+      assert.match(record.report ?? '', /^Launch failed: Error: session store unavailable/);
+      assert.equal(children.live(record.id), undefined, 'a rolled-back child is no longer running');
+    }
+    assert.equal(children.active, false);
+    assert.deepEqual(warnings, ['Subagent cleanup failed: Error: session 1 dispose failed', 'Subagent cleanup failed: Error: session 2 dispose failed']);
+    // All slots are free again: a full batch is refused for its own launch error, not the profile limit.
+    created = 2;
+    await assert.rejects(children.spawn(Array.from({ length: 8 }, (_, i) => ({ task: `again ${i}` })), dir), /session store unavailable/);
+  } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+async function quickChildren(dir: string) {
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple: model => {
+      const stream = createAssistantMessageEventStream();
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
+      queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
+      return stream;
+    },
+  });
+  return new Children(new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
+    async () => {}, () => {}, join(dir, 'profile'), { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+}
+
+test('a task cwd may start with ~ or be relative to the spawning agent; a missing one is refused', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-cwd-'));
+  const oldHome = process.env.HOME;
+  mkdirSync(join(dir, 'home', 'project'), { recursive: true });
+  mkdirSync(join(dir, 'main', 'sub'), { recursive: true });
+  const children = await quickChildren(dir);
+  try {
+    process.env.HOME = join(dir, 'home');
+    const [home, relative] = await children.spawn([{ task: 'home', cwd: '~/project' }, { task: 'relative', cwd: 'sub' }], join(dir, 'main'));
+    assert.equal(children.live(home)?.info.cwd, join(dir, 'home', 'project'));
+    assert.equal(children.live(relative)?.info.cwd, join(dir, 'main', 'sub'));
+    await assert.rejects(children.spawn([{ task: 'typo', cwd: '~/projcet' }], join(dir, 'main')), /No such directory/);
+    await until(() => !children.active);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    await children.close(); rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a broken package.json above an installed extension does not block spawning', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-manifest-'));
+  const agentDir = process.env.PI_CODING_AGENT_DIR ?? '';
+  mkdirSync(join(agentDir, 'extensions'), { recursive: true });
+  writeFileSync(join(agentDir, 'extensions', 'web.js'), `export default (pi) => pi.registerTool({ name: 'installed_web', label: 'w', description: 'w', parameters: { type: 'object', properties: {} }, execute: async () => ({ content: [], details: {} }) });\n`);
+  writeFileSync(join(agentDir, 'package.json'), '{ "name": "half-written",');
+  const children = await quickChildren(dir);
+  try {
+    const [id] = await children.spawn([{ task: 'inspect tools' }], dir);
+    assert.ok(children.live(id)?.session.getAllTools().some(t => t.name === 'installed_web'));
+    await until(() => !children.active);
+  } finally {
+    await children.close(); rmSync(dir, { recursive: true, force: true });
+    rmSync(join(agentDir, 'package.json'), { force: true }); rmSync(join(agentDir, 'extensions'), { recursive: true, force: true });
+  }
+});
+
+test('a ~\\ task cwd is the home directory on Windows only', () => {
+  assert.equal(taskDirectory('/base', '~\\project', true), resolve('/base', `${homedir()}\\project`));
+  assert.equal(taskDirectory('/base', '~\\project', false), resolve('/base', '~\\project'), 'a POSIX backslash is a literal character');
+  assert.equal(taskDirectory('/base', '~/project', false), join(homedir(), 'project'));
 });

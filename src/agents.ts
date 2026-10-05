@@ -32,6 +32,10 @@ const packageName = (path: string): string | undefined => {
     } catch { return undefined; } // A broken manifest is not OptChat's and must not block every spawn.
   }
 };
+/** A task's cwd may start with `~` and may be relative to the spawning agent's directory. */
+export const taskDirectory = (cwd: string, path = '.', windows = process.platform === 'win32') =>
+  resolve(cwd, path.replace(windows ? /^~(?=$|[\\/])/ : /^~(?=$|\/)/, homedir()));
+export const CWD_DOC = 'Project directory the subagent works in (~ allowed); its AGENTS.md files load from there. Defaults to your current directory.';
 const isOptchat = (path: string) => packageName(path) === 'pi-optchat';
 export class Children {
   private readonly running = new Map<string, LiveRun>();
@@ -91,7 +95,7 @@ export class Children {
   }
   async spawn(tasks: SpawnTask[], cwd: string, signal?: AbortSignal) {
     // Each child starts in its project, so Pi loads that project's AGENTS.md files for it.
-    const directories = tasks.map(t => resolve(cwd, (t.cwd ?? '.').replace(/^~(?=$|\/)/, homedir())));
+    const directories = tasks.map(t => taskDirectory(cwd, t.cwd));
     for (const directory of directories) if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new Error(`No such directory: ${directory}`);
     if (this.closing) throw new Error('Profile is closing.');
     this.settling++;
@@ -145,7 +149,7 @@ export class Children {
       }
     } catch (error) {
       for (const child of launched) {
-        child.session.dispose(); this.running.delete(child.info.id);
+        this.dispose(child.session); this.running.delete(child.info.id);
         child.info.state = 'failed'; child.info.ended = Date.now(); child.info.report = `Launch failed: ${String(error)}`;
         this.save(child.info);
       }
@@ -172,6 +176,9 @@ export class Children {
       },
     };
   }
+  private dispose(session: AgentSession) {
+    try { session.dispose(); } catch (error) { this.warn(`Subagent cleanup failed: ${String(error)}`); }
+  }
   private async execute(live: LiveRun, view: string) {
     const { session, info } = live;
     try {
@@ -187,9 +194,8 @@ export class Children {
       for (const g of info.guidance) if (g.state === 'queued') g.state = 'undelivered';
       try { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); }
       catch (error) { this.warn(`Subagent cleanup failed: ${String(error)}`); }
-      try { session.dispose(); }
-      catch (error) { this.warn(`Subagent cleanup failed: ${String(error)}`); }
-      this.running.delete(info.id);
+      // A failed dispose must neither keep the slot taken nor drop the report below.
+      this.dispose(session); this.running.delete(info.id);
     }
     // A metadata failure must not suppress delivery of the actual result.
     try { this.save(info); } catch (error) { this.warn(`Could not save run metadata: ${String(error)}`); }

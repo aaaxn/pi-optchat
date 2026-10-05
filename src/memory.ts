@@ -120,6 +120,17 @@ export class Memory {
   get pending() { return this.root.length - this.leaves; }
   get active() { return this.busy.size; }
   get size() { return this.viewBytes; }
+  /** The view tiles the log in order, so a binary search finds the part covering a position. */
+  private visible(part: Part) {
+    const at = start(part);
+    for (let lo = 0, hi = this.view.length - 1; lo <= hi;) {
+      const mid = (lo + hi) >> 1, p = this.view[mid];
+      if (end(p) <= at) lo = mid + 1;
+      else if (start(p) > at) hi = mid - 1;
+      else return p.l === part.l && p.i === part.i;
+    }
+    return false;
+  }
   private fit(total = this.root.length) {
     while (this.viewBytes > this.budget) {
       let best = -1; let due = -Infinity;
@@ -184,8 +195,8 @@ export class Memory {
     const node = { ...part, text, size: bytes(text) };
     appendJson(join(this.directory, 'tree', `${localDay()}.jsonl`), node);
     this.tree.set(key(part), node); this.retryAt.delete(key(part));
-    // An unbuilt leaf is always still in the view: its parent needs it before any merge.
-    if (part.l === 0) { this.leaves++; this.viewBytes += node.size - UNBUILT_BYTES; }
+    // A leaf is usually still in the view when built, but after a damaged tree file a saved parent can already hide it.
+    if (part.l === 0) { this.leaves++; if (this.visible(part)) this.viewBytes += node.size - UNBUILT_BYTES; }
     if (!this.retryAt.size) this.lastError = undefined;
     this.fit();
   }

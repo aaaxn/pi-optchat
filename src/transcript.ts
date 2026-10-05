@@ -5,15 +5,21 @@ import { cap, type Memory } from './memory.ts';
 /** Subagent traffic to the main agent: a custom message on screen, a plain user message to the model and memory. */
 export const REPORT_TYPE = 'optchat-report';
 
-export function textContent(content: unknown): string {
+export function textContent(content: unknown, images = true): string {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
   return content.map((part: unknown) => {
     if (typeof part !== 'object' || part === null) return '';
     if ('type' in part && part.type === 'text' && 'text' in part && typeof part.text === 'string') return part.text;
-    if ('type' in part && part.type === 'image') return '[image attachment: available in Pi session; text memory does not preserve image bytes]';
+    if (images && 'type' in part && part.type === 'image') return '[image attachment: available in Pi session; text memory does not preserve image bytes]';
     return '';
   }).filter(Boolean).join('\n');
+}
+/** What the user typed, as Pi's input event (and so the inbox) saw it: no image placeholders, and without the
+ * `[Image …]` notes Pi appends after the text when it resizes, converts or omits an attached image. */
+export function typedText(content: unknown) {
+  const text = textContent(content, false);
+  return { text, bare: text.replace(/\n\n\[Image[ :][^\n]*\](?:\n\[Image[ :][^\n]*\])*$/, '') };
 }
 /** Reports reach the model and memory exactly as the user messages they used to be. */
 export function asUser(message: AgentMessage): AgentMessage {
