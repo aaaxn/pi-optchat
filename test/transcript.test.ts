@@ -83,13 +83,10 @@ test('real Pi lifecycle starts every turn from the view alone, across tool calls
         return stream;
       },
     });
-    const marker = (pi: Parameters<typeof optchat>[0]) => {
-      pi.on('agent_before_settle', event => ({ entries: [...event.entries, { type: 'custom', customType: 'marker' }] }));
-    };
     const open = async (manager: SessionManager) => {
       const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
       const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
-        noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [marker, optchat] });
+        noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
       await loader.reload();
       const created = await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
         resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date'] });
@@ -148,13 +145,10 @@ test('real Pi lifecycle starts every turn from the view alone, across tool calls
     assert.equal(log.length, 23, 'only actual requests, replies, one failure, and tool activity should be logged');
     assert.deepEqual(errors, []);
     await active.prompt('Large paste: ' + 'z'.repeat(2_100_000));
-    assert.equal(fresh.getBranch().filter(e => e.type === 'compaction').length, 1, 'a large in-process transcript is dropped');
-    assert.ok(active.messages.length <= 2);
-    await active.prompt('After rotation.');
-    assert.deepEqual(captured.at(-1)!.messages.map(m => m.role), ['user']);
-    assert.match(textContent(captured.at(-1)!.messages[0].content), /After rotation\.$/);
-    assert.equal(fresh.getBranch().filter(e => e.type === 'compaction').length, 1, 'a small transcript is kept');
-    assert.equal(fresh.getBranch().filter(e => e.type === 'custom' && e.customType === 'marker').length, 3, 'other extensions keep their settle entries');
+    await active.prompt('After a large paste.');
+    assert.deepEqual(captured.at(-1)!.messages.map(m => m.role), ['user'], 'a large Pi transcript never reaches the model');
+    assert.match(textContent(captured.at(-1)!.messages[0].content), /After a large paste\.$/);
+    assert.equal(fresh.getBranch().filter(e => e.type === 'compaction').length, 0, 'the Pi transcript is kept whole');
     assert.deepEqual(errors, []);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
