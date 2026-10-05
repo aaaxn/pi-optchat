@@ -83,10 +83,13 @@ test('real Pi lifecycle starts every turn from the view alone, across tool calls
         return stream;
       },
     });
+    const marker = (pi: Parameters<typeof optchat>[0]) => {
+      pi.on('agent_before_settle', event => ({ entries: [...event.entries, { type: 'custom', customType: 'marker' }] }));
+    };
     const open = async (manager: SessionManager) => {
       const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
       const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
-        noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+        noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [marker, optchat] });
       await loader.reload();
       const created = await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
         resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date'] });
@@ -151,6 +154,7 @@ test('real Pi lifecycle starts every turn from the view alone, across tool calls
     assert.deepEqual(captured.at(-1)!.messages.map(m => m.role), ['user']);
     assert.match(textContent(captured.at(-1)!.messages[0].content), /After rotation\.$/);
     assert.equal(fresh.getBranch().filter(e => e.type === 'compaction').length, 1, 'a small transcript is kept');
+    assert.equal(fresh.getBranch().filter(e => e.type === 'custom' && e.customType === 'marker').length, 3, 'other extensions keep their settle entries');
     assert.deepEqual(errors, []);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }

@@ -245,7 +245,7 @@ export default function optchat(pi: ExtensionAPI) {
   // and the current run. Drop that transcript once it grows large; the log on disk keeps every entry.
   pi.on('agent_before_settle', event => {
     if (!active || JSON.stringify(event.context.contextMessages).length <= ROTATE) return;
-    return { entries: [{ type: 'compaction', firstKeptEntryId: null,
+    return { entries: [...event.entries, { type: 'compaction', firstKeptEntryId: null,
       summary: 'OptChat keeps history in its memory view. Earlier Pi transcript was dropped from the in-process context; the session file still holds it.' }] };
   });
   pi.on('session_before_compact', (_event, ctx) => {
