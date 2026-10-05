@@ -25,10 +25,9 @@ Fixes that suit both designs go upstream. Upstream already took these from the f
 |---|---|---|
 | Same profile in a second terminal | Refused. A new session can go **Back** and pick another profile | Can connect as a subagent conversation in that terminal's directory, with `/tell-main`, `/complete`, and a handoff summary |
 
-## Long-lived sessions and cost
+## Cache and compactor
 
 | | This fork | Upstream |
 |---|---|---|
-| Pi's in-process transcript | Dropped once it passes 2 MB, because Pi copies it on every model call. The session file keeps every entry | Grows for the whole session |
 | OpenAI Responses APIs | `reasoning.context: all_turns`, so a message that arrives mid-run keeps earlier reasoning. The compactor shares one cache key over SSE | No OpenAI-specific settings |
 | Compactor scale line | A dense 512-byte example (recipe §4.2) | A shorter example padded with dots |
