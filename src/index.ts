@@ -10,7 +10,7 @@ import { Memory } from './memory.ts';
 import { createCompressor } from './compactor.ts';
 import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
 import { MASTER, VIEW_DOC } from './prompts.ts';
-import { cachePayload, record } from './cache.ts';
+import { cacheFor, record } from './cache.ts';
 import { boundedMessage, buildContext, logMessage, textContent } from './transcript.ts';
 import { memoryTools, result } from './tools.ts';
 import { Children } from './agents.ts';
@@ -239,7 +239,7 @@ export default function optchat(pi: ExtensionAPI) {
       return { messages: [{ role: 'system', content: 'OptChat context unavailable. Stop.', timestamp: 0 }] };
     }
   });
-  pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
+  pi.on('before_provider_request', (event, ctx) => cacheFor(ctx.model?.api, event.payload));
   pi.on('cache_warming_decision', () => ({ action: 'stop' }));
   // Pi clones its whole in-process transcript on every model call, although the context sent is only the view
   // and the current run. Drop that transcript once it grows large; the log on disk keeps every entry.

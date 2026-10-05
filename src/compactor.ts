@@ -3,7 +3,7 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { COMPACT } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
-import { cachePayload } from './cache.ts';
+import { cacheFor } from './cache.ts';
 import { IMPORT_GUIDANCE } from './import/guidance.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
@@ -21,7 +21,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     for (let attempt = 0; attempt < 5; attempt++) {
       const reply = await registry.streamSimple(model, { systemPrompt: COMPACT, messages }, {
         reasoning: selected.thinking === 'off' ? undefined : selected.thinking, signal, cacheRetention: 'short',
-        onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload) : payload,
+        sessionId: 'optchat-compactor', transport: 'sse', onPayload: payload => cacheFor(model.api, payload),
       }).result();
       onUsage(reply);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);
