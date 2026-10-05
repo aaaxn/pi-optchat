@@ -150,7 +150,9 @@ export class Children {
     } finally {
       info.ended = Date.now();
       for (const g of info.guidance) if (g.state === 'queued') g.state = 'undelivered';
-      try { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+      try { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); }
+      catch (error) { this.warn(`Subagent cleanup failed: ${String(error)}`); }
+      try { session.dispose(); }
       catch (error) { this.warn(`Subagent cleanup failed: ${String(error)}`); }
       this.running.delete(info.id);
     }
