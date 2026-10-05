@@ -87,15 +87,13 @@ test('stable cache cuts preserve every character and cap marks at four', () => {
   assert.equal(payload.messages[0].content.map(b => b.text).join(''), view + 'new question');
 });
 
-test('OpenAI requests get the same view breakpoints and keep reasoning across turns', () => {
+test('OpenAI requests keep reasoning across turns and send the view unchanged', () => {
   const view = '<chat>\n' + '0+1|summary of a decision\n'.repeat(5500) + '</chat>';
   const payload = { instructions: 'system', reasoning: { effort: 'high' },
     input: [{ role: 'user', content: [{ type: 'input_text', text: view }, { type: 'input_text', text: 'new question' }] }] };
   cacheFor('openai-codex-responses', payload);
-  const blocks = payload.input[0].content as { text: string; prompt_cache_breakpoint?: unknown }[];
-  assert.equal(blocks.map(b => b.text).join(''), view + 'new question');
-  assert.equal(blocks.filter(b => b.prompt_cache_breakpoint).length, 3);
-  assert.ok(!blocks.at(-1)!.prompt_cache_breakpoint && !blocks.at(-2)!.prompt_cache_breakpoint, 'the view tail and new input stay unmarked');
+  assert.equal(payload.input[0].content.length, 2);
+  assert.doesNotMatch(JSON.stringify(payload), /prompt_cache_breakpoint/);
   assert.deepEqual(payload.reasoning, { effort: 'high', context: 'all_turns' });
   const plain: Record<string, unknown> = { input: [{ role: 'user', content: [{ type: 'input_text', text: 'hi' }] }] };
   assert.equal(cacheFor('openai-responses', plain), plain);

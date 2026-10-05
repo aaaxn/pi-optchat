@@ -56,20 +56,10 @@ export function cachePayload(payload: unknown): unknown {
   return payload;
 }
 
-/** OpenAI Responses: the same three view breakpoints, and reasoning kept across mid-run messages (recipe §8). */
+/** OpenAI Responses: keep reasoning across mid-run messages (recipe §8). The view relies on implicit prefix
+ * caching, because the gpt-5.6 models reject explicit prompt_cache_breakpoint marks. */
 export function openaiCachePayload(payload: unknown): unknown {
-  if (!record(payload) || !Array.isArray(payload.input)) return payload;
-  for (const item of payload.input) {
-    if (!record(item) || !Array.isArray(item.content)) continue;
-    const i = item.content.findIndex((block: unknown) => record(block) && block.type === 'input_text'
-      && typeof block.text === 'string' && block.text.startsWith('<chat>\n'));
-    if (i < 0) continue;
-    const pieces = splitView(item.content[i].text);
-    item.content.splice(i, 1, ...pieces.map((text, j) => ({ type: 'input_text', text,
-      ...(j < pieces.length - 1 ? { prompt_cache_breakpoint: { mode: 'explicit' } } : {}) })));
-    break;
-  }
-  if (record(payload.reasoning)) payload.reasoning = { ...payload.reasoning, context: 'all_turns' };
+  if (record(payload) && record(payload.reasoning)) payload.reasoning = { ...payload.reasoning, context: 'all_turns' };
   return payload;
 }
 
