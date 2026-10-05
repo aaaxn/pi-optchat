@@ -53,7 +53,8 @@ export class TranscriptView {
   private streaming?: AssistantMessageComponent;
   private expanded = false;
   constructor(private readonly tui: TUI, private readonly cwd: string, private readonly definition: (name: string) => Renderers = () => undefined) {}
-  toggleTools() { this.expanded = !this.expanded; for (const tool of this.tools.values()) tool.setExpanded(this.expanded); }
+  toggleTools() { this.setExpanded(!this.expanded); }
+  setExpanded(expanded: boolean) { if (expanded === this.expanded) return; this.expanded = expanded; for (const tool of this.tools.values()) tool.setExpanded(expanded); }
   private tool(id: string, name: string, args: unknown) {
     let tool = this.tools.get(id);
     if (!tool) {

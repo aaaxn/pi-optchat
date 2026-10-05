@@ -8,13 +8,13 @@ import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type Extensi
 import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { createCompressor } from './compactor.ts';
-import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, type ProfileConfig } from './profiles.ts';
+import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
 import { MASTER, VIEW_DOC } from './prompts.ts';
 import { cacheFor, record } from './cache.ts';
-import { asUser, boundedMessage, buildContext, logMessage, REPORT_TYPE, textContent } from './transcript.ts';
+import { asUser, boundedMessage, buildContext, logMessage, REPORT_TYPE, textContent, typedText } from './transcript.ts';
 import { registerReportRenderer } from './report-message.ts';
 import { memoryTools, result } from './tools.ts';
-import { Children } from './agents.ts';
+import { Children, CWD_DOC } from './agents.ts';
 import { exportBrowser } from './browser.ts';
 import { Inbox } from './inbox.ts';
 import { checkpoint } from './checkpoint.ts';
@@ -25,6 +25,7 @@ import { UsageLedger } from './usage.ts';
 import { showInspector, type InspectorPage } from './inspector.ts';
 import { showAgentView } from './agent-view.ts';
 import { inspectorShortcut, mountNavigation } from './navigation.ts';
+import { mainTitle, TabTitle } from './title.ts';
 
 const binding = 'optchat.profile';
 const ROTATE = 2_000_000;
@@ -48,6 +49,13 @@ export default function optchat(pi: ExtensionAPI) {
   let unmountNavigation: (() => void) | undefined;
   let inspectorController: AbortController | undefined;
   const shortcut = inspectorShortcut();
+  const title = new TabTitle();
+  let working = false;
+  let untitle: (() => void) | undefined;
+  const showTitle = (ctx: ExtensionContext) => {
+    const a = active;
+    if (a) title.show(text => ctx.ui.setTitle(text), mainTitle(a.name, working, a.children.ids.length));
+  };
   const reportReceipt = (text: string) => 'report:' + createHash('sha256').update(text).digest('hex');
   const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
   pi.registerFlag('optchat-profile', { description: 'OptChat profile (required for noninteractive sessions without a saved binding)', type: 'string' });
@@ -93,8 +101,10 @@ export default function optchat(pi: ExtensionAPI) {
     } finally {
       await old.memory.close(); await old.unlock(); active = undefined;
       run = []; logged = 0; view = undefined; runStarted = false; receipts.clear(); prompt = '';
+      untitle?.(); untitle = undefined; title.clear(); working = false;
     }
   };
+  const BACK = 'Back';
   const chooseProfile = async (ctx: ExtensionContext): Promise<string | undefined> => {
     if (!ctx.hasUI) return undefined;
     const names = listProfiles(), last = lastProfile();
@@ -134,11 +144,13 @@ export default function optchat(pi: ExtensionAPI) {
       rememberProfile(name);
       active = { name, dir, config, memory, inbox, children, usage, unlock }; fault = undefined;
       if (ctx.mode === 'tui') unmountNavigation = mountNavigation(ctx, children, shortcut, page => { void inspect(ctx, page); });
+      untitle = children.subscribe(() => showTitle(ctx)); showTitle(ctx);
       status(ctx);
       ctx.ui.notify(`OptChat · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})`, 'info');
       const queuedReports = [...reports];
       setImmediate(() => { if (active?.memory === memory && !pendingImport(dir)) for (const text of queuedReports) sendReport(text); });
     } catch (error) {
+      untitle?.(); untitle = undefined; title.clear();
       if (active && active.memory === openingMemory) {
         unmountNavigation?.(); unmountNavigation = undefined;
         await active.children.close(); active = undefined;
@@ -150,20 +162,34 @@ export default function optchat(pi: ExtensionAPI) {
 
   pi.on('session_start', async (_event, ctx) => {
     stopping = false;
-    const saved = ctx.sessionManager.getEntries().find(e => e.type === 'custom' && e.customType === binding);
+    const entries = ctx.sessionManager.getEntries();
+    const saved = entries.findLast(e => e.type === 'custom' && e.customType === binding);
     const boundName = saved?.type === 'custom' && record(saved.data) && typeof saved.data.name === 'string' ? saved.data.name : undefined;
+    // A session with conversation in it belongs to its profile. One that is only bound (a fresh `/optchat profile` session) may still pick another.
+    const settled = boundName !== undefined && entries.some(e => e.type === 'message' || e.type === 'custom_message');
     const flag = pi.getFlag('optchat-profile');
     try {
       if (boundName && typeof flag === 'string' && flag !== boundName) throw new Error(`Session belongs to ${boundName}; cannot resume it as ${flag}.`);
-      const name = boundName ?? (typeof flag === 'string' ? flag : await chooseProfile(ctx));
-      if (!name) { status(ctx); return; }
-      await openProfile(name, ctx);
-      if (!boundName) pi.appendEntry(binding, { name });
+      let name = boundName ?? (typeof flag === 'string' ? flag : await chooseProfile(ctx));
+      for (;;) {
+        if (!name) { status(ctx); return; }
+        try { await openProfile(name, ctx); break; }
+        catch (error) {
+          if (!(error instanceof ProfileBusyError) || ctx.mode !== 'tui') throw error;
+          // A resumed conversation already belongs to this profile, so another profile needs a new session (/optchat profile).
+          if (settled || await ctx.ui.select(`${name} is open in another window\n${error.owner}`, [BACK]) !== BACK) throw error;
+          name = await chooseProfile(ctx);
+        }
+      }
+      if (name !== boundName) pi.appendEntry(binding, { name });
     } catch (error) {
       if (active) await stop().catch(() => {});
       fault = errorText(error); ctx.ui.notify(fault, 'error');
     }
+    // Pi sets its own title once every session_start handler has finished, so put ours back afterwards.
+    for (const ms of [0, 250, 1000]) setTimeout(() => title.reapply(), ms).unref();
   });
+  pi.on('session_info_changed', () => title.reapply()); // Pi retitles the tab on session renames, just before this.
   pi.on('session_shutdown', stop);
   pi.on('session_before_switch', () => importing || active?.children.active ? { cancel: true } : undefined);
   pi.on('session_before_fork', () => importing || active?.children.active ? { cancel: true } : undefined);
@@ -178,7 +204,10 @@ export default function optchat(pi: ExtensionAPI) {
   });
   const startRun = () => { flush(); run = []; logged = 0; view = undefined; runStarted = true; };
   // A report sent while Pi is idle starts its run without before_agent_start; it reuses the last built prompt.
-  pi.on('agent_start', () => { if (active && !runStarted) startRun(); });
+  pi.on('agent_start', (_event, ctx) => {
+    working = true; showTitle(ctx);
+    if (active && !runStarted) startRun();
+  });
   pi.on('before_agent_start', event => {
     startRun();
     const a = required();
@@ -196,8 +225,10 @@ export default function optchat(pi: ExtensionAPI) {
         const text = textContent(message.content);
         if (reports.includes(text)) receipts.set(message, reportReceipt(text));
         else {
-          const skill = parseSkillBlock(text);
-          let receipt = active.inbox.claim(text) ?? (skill ? active.inbox.claimSkill(skill.name, skill.userMessage) : undefined);
+          // The inbox journaled the typed input: match without image placeholders or Pi's image notes.
+          const typed = typedText(message.content), skill = parseSkillBlock(typed.bare);
+          let receipt = active.inbox.claim(typed.text) ?? active.inbox.claim(typed.bare)
+            ?? (skill ? active.inbox.claimSkill(skill.name, skill.userMessage) : undefined);
           if (!receipt) { active.inbox.record(text); receipt = active.inbox.claim(text); }
           if (receipt) receipts.set(message, receipt);
         }
@@ -251,6 +282,7 @@ export default function optchat(pi: ExtensionAPI) {
     collectUsage(ctx);
     try { flush(); } catch (error) { fault = errorText(error); ctx.ui.notify(fault, 'error'); }
     runStarted = false; status(ctx);
+    working = false; showTitle(ctx);
     if (active) {
       const dir = active.dir;
       checkpoints = checkpoints.then(() => checkpoint(dir)).catch(error => ctx.ui.notify(`Local checkpoint failed: ${errorText(error)}`, 'error'));
@@ -260,8 +292,8 @@ export default function optchat(pi: ExtensionAPI) {
   registerReportRenderer(pi);
   for (const tool of memoryTools(() => required().memory)) pi.registerTool(tool);
   pi.registerTool({ name: 'spawn', label: 'Spawn background agents',
-    description: 'Start one background subagent per task, in parallel, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. Each receives the current memory view and read-only zoom/date. When all of this spawn\'s subagents finish, their reports arrive together as one message; never poll or sleep waiting for them. Put independent work in separate spawns. The profile allows 8 active agents.',
-    parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: 'Project directory the subagent works in; its AGENTS.md files load from there. Defaults to the main chat\'s directory.' })) }), { minItems: 1, maxItems: 8 }) }),
+    description: 'Start background subagents, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. Each receives the current memory view and read-only zoom/date. Children may delegate two more levels; the whole profile allows 8 active agents. Completion reports arrive automatically; never poll or sleep waiting for them.',
+    parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1, maxItems: 8 }) }),
     async execute(_id, args, signal, _update, ctx) {
       const ids = await required().children.spawn(args.tasks, ctx.cwd, signal); status(ctx);
       return result(`Started: ${ids.join(', ')}. Reports will arrive automatically.`);

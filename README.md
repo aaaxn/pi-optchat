@@ -1,5 +1,10 @@
 # pi-optchat
 
+> **Fork of [jonaslsaa/pi-optchat](https://github.com/jonaslsaa/pi-optchat).** See [FORK.md](FORK.md) for every difference. The main ones:
+> - Each turn starts from the memory view and your new message; the last exchange is not carried over.
+> - Only the main agent delegates. Subagents are one level deep, and one spawn sends one report.
+> - No connected windows: one Pi window per profile, meant to stay open and delegate to every project.
+
 A Pi extension that implements [Victor Taelin's OptChat recipe](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449): one endless chat per profile, remembered through a summary tree instead of compaction.
 
 - **Memory**: every message is logged and summarized into a binary tree. Each turn starts from a fresh context holding a bounded memory view; the agent uses `zoom` and `date` to read originals.
@@ -154,13 +159,15 @@ To delete a profile, delete its folder. Your original Pi sessions are kept in Pi
 
 ## Good to know
 
+- **One window per profile.** Opening a profile that is already open elsewhere fails; a new session can go **Back** and pick another profile.
 - **Profiles separate memory and instructions only.** Agents keep full filesystem access and share provider credentials.
+- **Tab title**: the terminal tab shows the profile and what it is doing: `π personal` while waiting for you, `● π personal` while the agent works, plus `· 2 agents` while subagents run. OptChat replaces Pi's default title and puts its own back when Pi resets it (new session, reload, rename).
 - **Use worktrees** when parallel agents edit the same repository; they share the filesystem.
 - **Instructions**: the main agent and subagents get Pi's usual global and repository `AGENTS.md` files and your skills, followed by the profile's `AGENTS.md`, which comes last and wins. OptChat replaces only Pi's opening prompt. Prompt templates work in the main session only.
 - **Images** are available during the current run but stored in memory as text placeholders.
 - **Pi's auto-compaction is off.** A single very long run can still hit the model's context limit; stop it and continue in a new turn.
 - **Restarts**: unsent inputs are recovered into memory, and pending subagent reports are delivered. Interrupted subagents are not restarted.
-- **Skill and template inputs** can occasionally be recovered as an unanswered input after a crash, because Pi expands them after the input journal records them. Plain text chat is unaffected.
+- **Prompt-template inputs** can be saved twice: expanded, and later in their original form as an unanswered input, because Pi expands them after the input journal records them. Skill commands (`/skill:name`) are matched back to their journaled input and don't have this problem. Plain text chat is unaffected.
 
 ## How it differs from the recipe
 

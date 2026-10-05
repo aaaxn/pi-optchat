@@ -177,3 +177,84 @@ test('incremental view size and pending count match the rendered view across fai
     assert.equal(memory.size, measured(memory));
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+// Work counters, not timings: the old code re-measured the whole view on every fit and rescanned every level from 0 on every pump.
+function longProfile(count: number) {
+  // Written directly: one fsync per append would make the fixture slow. Short entries are their own summaries.
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-scale-'));
+  mkdirSync(join(dir, 'main')); mkdirSync(join(dir, 'tree'));
+  const date = new Date().toISOString(), lines: string[] = [], nodes: string[] = [];
+  for (let i = 0; i < count; i++) lines.push(JSON.stringify({ i, kind: 'user', text: `m${i}`, date }));
+  for (let l = 0, n = count; n > 0; l++, n = Math.floor(n / 2))
+    for (let i = 0; i < n; i++) nodes.push(JSON.stringify({ l, i, text: `summary ${l}:${i}` }));
+  writeFileSync(join(dir, 'main', `${localDay()}.jsonl`), lines.join('\n') + '\n');
+  writeFileSync(join(dir, 'tree', `${localDay()}.jsonl`), nodes.join('\n') + '\n');
+  return dir;
+}
+
+test('loading a long profile does not re-measure the whole view for every message', async () => {
+  const count = 2048, dir = longProfile(count);
+  const get = Map.prototype.get;
+  let lookups = 0;
+  Map.prototype.get = function (this: Map<unknown, unknown>, key: unknown) { lookups++; return get.call(this, key); };
+  let memory: Memory | undefined;
+  try { memory = new Memory(dir, async () => 'unused', () => {}); }
+  finally { Map.prototype.get = get; }
+  try {
+    assert.equal(memory.view.length, count);
+    assert.ok(lookups < 10 * count, `${lookups} lookups to load ${count} messages`);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a new message is summarized without rescanning every built node', async () => {
+  const count = 2048, dir = longProfile(count);
+  // A small budget keeps the view short, as in a real profile, so the tree is far larger than the view.
+  const memory = new Memory(dir, async () => 'unused', () => {}, 1000);
+  try {
+    assert.ok(memory.view.length < 100);
+    await memory.settle(AbortSignal.timeout(10000), true); // the first pump after load finds each level's frontier
+    const get = memory.tree.get;
+    let lookups = 0;
+    memory.tree.get = function (this: typeof memory.tree, key) { lookups++; return get.call(this, key); };
+    memory.append('user', 'one more');
+    await memory.settle(AbortSignal.timeout(10000), true);
+    assert.equal(memory.pending, 0);
+    assert.ok(lookups < count / 2, `${lookups} tree lookups for one new message over ${count}`);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('an expanded /skill: command claims the input it came from, and only that one', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-inbox-'));
+  try {
+    const inbox = new Inbox(dir);
+    const plain = inbox.record('/skill:demox');
+    const skill = inbox.record('/skill:demox  go');
+    assert.equal(inbox.claimSkill('demo', 'go'), undefined, 'a skill name must match whole');
+    assert.equal(inbox.claimSkill('demox', 'other'), undefined, 'arguments must match');
+    assert.equal(inbox.claimSkill('demox', 'go'), skill);
+    assert.equal(inbox.claimSkill('demox', 'go'), undefined, 'an input is claimed once');
+    assert.equal(inbox.claimSkill('demox'), plain);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('rebuilding a leaf that a saved parent already hides does not inflate the view size', async () => {
+  // A damaged tree file can lose a leaf while its parent survives; loading then merges the unbuilt leaf away.
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-hidden-'));
+  mkdirSync(join(dir, 'main')); mkdirSync(join(dir, 'tree'));
+  const date = new Date().toISOString();
+  const texts = ['x'.repeat(400), 'b', 'c', 'd'];
+  writeFileSync(join(dir, 'main', `${localDay()}.jsonl`), texts.map((text, i) => JSON.stringify({ i, kind: 'user', text, date })).join('\n') + '\n');
+  const nodes = [{ l: 0, i: 1 }, { l: 0, i: 2 }, { l: 0, i: 3 }, { l: 1, i: 0 }, { l: 1, i: 1 }];
+  writeFileSync(join(dir, 'tree', `${localDay()}.jsonl`), nodes.map(n => JSON.stringify({ ...n, text: `summary ${n.l}:${n.i} padded to twenty` })).join('\n') + '\n{damaged\n');
+  const measured = (memory: Memory) => memory.render().split('\n').slice(1, -1)
+    .reduce((n, line) => n + bytes(line.slice(line.indexOf('|') + 1)), 0);
+  const memory = new Memory(dir, async () => 'top', () => {}, 80);
+  try {
+    assert.ok(memory.view.every(p => p.l > 0), 'the unbuilt leaf 0 is hidden by its saved parent');
+    assert.equal(memory.pending, 1);
+    await memory.settle(AbortSignal.timeout(3000), true);
+    assert.equal(memory.pending, 0);
+    assert.equal(memory.size, measured(memory));
+    assert.ok(memory.size <= 80);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
