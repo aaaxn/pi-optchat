@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { Memory, localDay, type Compressor } from '../src/memory.ts';
 import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
 import { prepareImport, runImport, memoryDirectory, pendingImport, discardImport, deduplicate, chronological } from '../src/import/job.ts';
@@ -41,6 +42,33 @@ test('Claude imports user messages and final replies, omitting tool loops and re
     assert.equal(parsed.entries[0].date, date);
     const renamed = await readConversation({ ...conversation('claude', file), title: 'Renamed', project: '/moved' });
     assert.deepEqual(renamed.entries.map(e => e.receipt), parsed.entries.map(e => e.receipt));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Claude slash commands keep only typed arguments, local command output is dropped, and headers stay short', async () => {
+  const dir = temp(), file = join(dir, 'claude.jsonl');
+  const user = (uuid: string, content: string) => ({ type: 'user', uuid, sessionId: 'session-1', cwd: '/synthetic', timestamp: date, message: { role: 'user', content } });
+  const reply = (uuid: string, text: string) => ({ type: 'assistant', uuid, timestamp: date, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text }] } });
+  lines(file, [
+    user('compact', '<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>'),
+    user('stdout', '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>'),
+    user('stderr', '<local-command-stderr>Unknown command</local-command-stderr>'),
+    user('skill', '<command-message>oreo-mode</command-message>\n<command-name>/oreo-mode</command-name>\n<command-args>ship the parser fix</command-args>'),
+    reply('a1', 'shipped'),
+    user('plain', 'what is next?'),
+    reply('a2', 'the docs'),
+  ]);
+  try {
+    const parsed = await readConversation(conversation('claude', file));
+    assert.deepEqual(parsed.entries.map(e => e.text.slice(e.text.indexOf(']\n') + 2)), ['/oreo-mode ship the parser fix', 'shipped', 'what is next?', 'the docs']);
+    assert.equal(parsed.entries[0].text.split('\n')[0], '[Historical claude · 2026-01-02 12:00Z · Fixture]', 'no conversation id or seconds');
+    assert.equal(parsed.entries[0].origin?.conversation, 'conversation-1', 'the id stays in the structured origin');
+    assert.doesNotMatch(JSON.stringify(parsed.entries), /command-|Compacted|Unknown command/);
+    // The receipt hashes the raw command, so a command imported before this filter is still recognized.
+    const raw = '<command-message>oreo-mode</command-message>\n<command-name>/oreo-mode</command-name>\n<command-args>ship the parser fix</command-args>';
+    assert.equal(parsed.entries[0].receipt, `import:${createHash('sha256').update(JSON.stringify(['claude', 'conversation-1', 'skill', 'user', raw])).digest('hex')}`);
+    const scan = await scanLocal('claude', [dir]);
+    assert.equal(scan.conversations[0].title, '/oreo-mode ship the parser fix', 'a bare command never becomes the title');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -290,7 +318,7 @@ test('Claude memories import each topic file once as a dated note, and an edited
       ['note', '2026-03-04T05:06:07.000Z', '/tmp/alpha', 'Deploys'],
       ['note', date, '-work-beta', 'PR status'],
     ]);
-    assert.equal(first[0].text, '[Historical Claude Code memory · 2026-03-04T05:06:07.000Z · project /tmp/alpha · type feedback · Deploys]\nNever deploy on "Fridays"\n\nWait until Monday.');
+    assert.equal(first[0].text, '[Historical Claude Code memory · 2026-03-04 05:06Z · project /tmp/alpha · type feedback · Deploys]\nNever deploy on "Fridays"\n\nWait until Monday.');
     assert.match(first[1].text, /project -work-beta · type project · PR status\]\nTracking PR\n\nPR #7023 is open\.$/);
     assert.doesNotMatch(JSON.stringify(first), /INDEX ONLY|SESSION SUMMARY/);
     const existing = first.map((e, i) => ({ ...e, i, size: 0 }));

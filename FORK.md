@@ -31,3 +31,10 @@ Fixes that suit both designs go upstream. Upstream already took these from the f
 |---|---|---|
 | OpenAI Responses APIs | `reasoning.context: all_turns`, so a message that arrives mid-run keeps earlier reasoning. The compactor shares one cache key over SSE | No OpenAI-specific settings |
 | Compactor scale line | A realistic 512-byte example with every kind and no ids or numbers (recipe §4.2) | A shorter example padded with dots to 512 bytes |
+
+## Import
+
+| | This fork | Upstream |
+|---|---|---|
+| Claude Code slash commands and local command output | Dropped. A command with typed arguments is kept as plain `/name args`, and never becomes the conversation title | Imported as user messages with their XML wrappers |
+| Header on each imported message | `[Historical <source> · YYYY-MM-DD HH:MMZ · <title>]`. The conversation id stays in the structured origin | Adds the conversation id and a full ISO timestamp, about twice as long |

@@ -26,6 +26,19 @@ export function timestamp(value: unknown, fallback: string): string {
   const time = typeof value === 'number' ? value * 1000 : typeof value === 'string' ? Date.parse(value) : NaN;
   return Number.isFinite(time) ? new Date(time).toISOString() : fallback;
 }
+/** Header time: minutes are enough to place a message, and the rest of an ISO stamp costs summary bytes. */
+const minute = (date: string) => `${date.slice(0, 16).replace('T', ' ')}Z`;
+/**
+ * Claude Code logs slash commands and their local output as user messages. Returns undefined for anything
+ * else, '' for scaffolding to drop, or `/name args` when the user typed arguments, which are a real request.
+ */
+export function claudeCommand(content: string): string | undefined {
+  const s = content.trimStart();
+  if (/^<local-command-(stdout|stderr)>/.test(s)) return '';
+  if (!/^<command-(name|message|args)>/.test(s)) return undefined;
+  const name = /<command-name>([^<]*)<\/command-name>/.exec(s)?.[1].trim(), args = /<command-args>([\s\S]*?)<\/command-args>/.exec(s)?.[1].trim();
+  return name && args ? `${name} ${args}` : '';
+}
 function text(value: unknown): string {
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) return value.map(text).filter(Boolean).join('\n');
@@ -43,7 +56,7 @@ function imported(c: Conversation, id: string, kind: Kind, content: string, date
   if (!content.trim()) return undefined;
   // Text provenance survives compression. Stable per-message receipts survive moved files and repeated exports.
   const origin: Origin = { source: c.source, conversation: c.id, message: id, title: c.title, project: c.project };
-  return { kind, date, origin, text: `[Historical ${c.source} · ${date} · conversation ${c.id} · ${c.title}]\n${content}`,
+  return { kind, date, origin, text: `[Historical ${c.source} · ${minute(date)} · ${c.title}]\n${content}`,
     receipt: `import:${digest(JSON.stringify([c.source, c.id, id, kind, identity]))}` };
 }
 async function* jsonLines(file: string, warnings: string[], limit = Infinity, signal?: AbortSignal) {
@@ -99,8 +112,10 @@ export async function scanLocal(source: 'claude' | 'codex', roots?: string[], si
           if (v.type === 'custom-title' || v.type === 'ai-title') title = string(v.customTitle ?? v.aiTitle) ?? title;
         }
         const m = source === 'claude' ? v.message : v.type === 'response_item' ? v.payload : undefined;
-        if (record(m) && m.role === 'user' && !title) {
-          title = text(m.content).replace(/\s+/g, ' ').slice(0, 110);
+        const typed = record(m) && m.role === 'user' && !title ? text(m.content) : '';
+        const first = source === 'claude' ? claudeCommand(typed) ?? typed : typed;
+        if (first.trim()) {
+          title = first.replace(/\s+/g, ' ').slice(0, 110);
           date = timestamp(v.timestamp, date);
         }
       }
@@ -217,7 +232,7 @@ async function readMemory(c: Conversation, signal?: AbortSignal): Promise<{ entr
   const date = timestamp(fields.get('modified'), modified.toISOString());
   return { warnings: [], entries: [{ kind: 'note', date,
     origin: { source: c.source, conversation: c.id, message: hash.slice(0, 16), title: name, project: c.project },
-    text: `[Historical Claude Code memory · ${date} · project ${c.project}${type ? ` · type ${one(type)}` : ''} · ${name}]\n${description ? one(description) + '\n\n' : ''}${body.trim()}`,
+    text: `[Historical Claude Code memory · ${minute(date)} · project ${c.project}${type ? ` · type ${one(type)}` : ''} · ${name}]\n${description ? one(description) + '\n\n' : ''}${body.trim()}`,
     receipt: `import:${digest(JSON.stringify([c.source, c.id, hash]))}` }] };
 }
 
@@ -317,7 +332,8 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
               warnings.push(`${c.file}:${line}: unsupported Claude content block ${String(b.type)} skipped`);
             return [];
           });
-          if (m.role === 'user' && parts.length) { finish(); for (const part of parts) add(part.id, 'user', part.content, date); }
+          // Receipts keep the raw text, so a command already imported is still recognized.
+          if (m.role === 'user' && parts.length) { finish(); for (const part of parts) add(part.id, 'user', claudeCommand(part.content) ?? part.content, date, part.content); }
           else if (m.role === 'assistant') {
             const final = m.stop_reason === 'end_turn' || m.stop_reason === 'stop_sequence';
             if (toolActivity || v.isApiErrorMessage === true || m.stop_reason && !final) pending = [];
