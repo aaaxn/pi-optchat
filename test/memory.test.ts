@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Memory, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
 import { lockProfile } from '../src/profiles.ts';
 import { splitView, cachePayload, cacheFor } from '../src/cache.ts';
+import { SCALE } from '../src/compactor.ts';
 import { logMessage, buildContext, boundedMessage } from '../src/transcript.ts';
 import { Inbox } from '../src/inbox.ts';
 import type { ToolResultMessage } from '@earendil-works/pi-ai';
@@ -100,6 +101,11 @@ test('OpenAI requests get the same view breakpoints and keep reasoning across tu
   assert.equal(cacheFor('openai-responses', plain), plain);
   assert.equal(plain.reasoning, undefined, 'a request without reasoning gets none');
   assert.equal(cacheFor('google-generative-ai', payload), payload);
+});
+
+test('the compactor scale line is exactly one node long', () => {
+  assert.equal(bytes(SCALE), 512);
+  assert.doesNotMatch(SCALE, /\.{3,}$/);
 });
 
 test('next turn excludes old conversation; current tool loop and reasoning remain verbatim', async () => {
