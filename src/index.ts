@@ -260,7 +260,7 @@ export default function optchat(pi: ExtensionAPI) {
   registerReportRenderer(pi);
   for (const tool of memoryTools(() => required().memory)) pi.registerTool(tool);
   pi.registerTool({ name: 'spawn', label: 'Spawn background agents',
-    description: 'Start one background subagent per task, in parallel, returning IDs immediately. Use only when the user asks. Each receives the current memory view and read-only zoom/date. When all of this spawn\'s subagents finish, their reports arrive together as one message; never poll or sleep waiting for them. Put independent work in separate spawns. The profile allows 8 active agents.',
+    description: 'Start one background subagent per task, in parallel, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. Each receives the current memory view and read-only zoom/date. When all of this spawn\'s subagents finish, their reports arrive together as one message; never poll or sleep waiting for them. Put independent work in separate spawns. The profile allows 8 active agents.',
     parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: 'Project directory the subagent works in; its AGENTS.md files load from there. Defaults to the main chat\'s directory.' })) }), { minItems: 1, maxItems: 8 }) }),
     async execute(_id, args, signal, _update, ctx) {
       const ids = await required().children.spawn(args.tasks, ctx.cwd, signal); status(ctx);

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { Type } from 'typebox';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, getAgentDir, type AgentSession, type AgentSessionEvent, type ModelRegistry } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -25,8 +26,10 @@ const packageName = (path: string): string | undefined => {
   for (let dir = dirname(path); dir !== dirname(dir); dir = dirname(dir)) {
     const manifest = join(dir, 'package.json');
     if (!existsSync(manifest)) continue;
-    const data: unknown = JSON.parse(readFileSync(manifest, 'utf8'));
-    return data && typeof data === 'object' && 'name' in data && typeof data.name === 'string' ? data.name : undefined;
+    try {
+      const data: unknown = JSON.parse(readFileSync(manifest, 'utf8'));
+      return data && typeof data === 'object' && 'name' in data && typeof data.name === 'string' ? data.name : undefined;
+    } catch { return undefined; } // A broken manifest is not OptChat's and must not block every spawn.
   }
 };
 const isOptchat = (path: string) => packageName(path) === 'pi-optchat';
@@ -88,7 +91,7 @@ export class Children {
   }
   async spawn(tasks: SpawnTask[], cwd: string, signal?: AbortSignal) {
     // Each child starts in its project, so Pi loads that project's AGENTS.md files for it.
-    const directories = tasks.map(t => resolve(cwd, t.cwd ?? '.'));
+    const directories = tasks.map(t => resolve(cwd, (t.cwd ?? '.').replace(/^~(?=$|\/)/, homedir())));
     for (const directory of directories) if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new Error(`No such directory: ${directory}`);
     if (this.closing) throw new Error('Profile is closing.');
     this.settling++;
