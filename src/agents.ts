@@ -150,9 +150,9 @@ export class Children {
     } finally {
       info.ended = Date.now();
       for (const g of info.guidance) if (g.state === 'queued') g.state = 'undelivered';
-      try { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); }
+      try { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
       catch (error) { this.warn(`Subagent cleanup failed: ${String(error)}`); }
-      finally { session.dispose(); this.running.delete(info.id); }
+      this.running.delete(info.id);
     }
     // A metadata failure must not suppress delivery of the actual result.
     try { this.save(info); } catch (error) { this.warn(`Could not save run metadata: ${String(error)}`); }

@@ -93,6 +93,7 @@ test('real SDK children stream, report once per spawn, acknowledge steering, sto
       assert.ok(tools.includes('zoom') && !tools.includes('spawn') && !tools.includes('tell'), 'subagents get zoom and date, not spawn');
     }
     await assert.rejects(children.spawn(Array.from({ length: 7 }, () => 'too-many'), dir), /8 active agents/);
+    children.live(second)!.session.dispose = () => { throw new Error('dispose failed'); };
     releases.get('second')!();
     await until(() => reports.length === 2);
     assert.equal(reports[1], `[${second}] Working on second`, 'separate spawns report independently');
@@ -100,6 +101,6 @@ test('real SDK children stream, report once per spawn, acknowledge steering, sto
     await until(() => !children.active);
     assert.equal(reports[2], `[${first}] Working on first`);
     assert.deepEqual([...systemPrompts], [`${SUBAGENT}\n\n${VIEW_DOC}\n\nProfile instructions.`], 'the child prompt is the recipe\'s, unchanged');
-    assert.deepEqual(warnings, []);
+    assert.deepEqual(warnings, ['Subagent cleanup failed: Error: dispose failed'], 'a failed cleanup must not drop the report');
   } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
