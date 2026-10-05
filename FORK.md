@@ -8,7 +8,7 @@ Fixes that suit both designs go upstream. Upstream already took these from the f
 
 | | This fork | Upstream |
 |---|---|---|
-| A run's context | The memory view and the new message (recipe, checklist item 11). The agent zooms when it needs earlier wording | The memory view, plus the last exchange in full, with no size bound |
+| A run's context | The memory view and the new message (recipe, checklist item 11). The agent zooms when it needs earlier wording | The memory view, plus the last exchange (your messages and the final answer), with no size bound |
 | Waiting for memory | Waits until every view line is a summary (recipe §6) | Also waits until the view fits its budget, which can wait on an unrelated merge |
 
 ## Subagents
@@ -16,7 +16,7 @@ Fixes that suit both designs go upstream. Upstream already took these from the f
 | | This fork | Upstream |
 |---|---|---|
 | Who delegates | Only the main agent. Subagents have no `spawn` or `tell` | Subagents may delegate two more levels. A parent waits for its children's reports |
-| Reports | One spawn, one report: its children's results reach the main agent together | Each child reports as soon as it finishes |
+| Reports | One spawn, one report: the results of all its subagents reach the main agent together | Each child reports as soon as it finishes |
 | `tell_parent` | Always reaches the main agent | Reaches the direct parent |
 
 ## Windows
