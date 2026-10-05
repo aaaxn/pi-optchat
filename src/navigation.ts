@@ -1,7 +1,7 @@
 import { CustomEditor, type ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { matchesKey, truncateToWidth, type KeyId } from '@earendil-works/pi-tui';
+import { matchesKey, truncateToWidth, visibleWidth, type KeyId } from '@earendil-works/pi-tui';
 import type { Children } from './agents.ts';
-import type { InspectorPage } from './inspector.ts';
+import { inspectorShowing, type InspectorPage } from './inspector.ts';
 import { isActiveRun } from './runs.ts';
 
 /** Configured before extension registration; this also works in legacy terminals with F6. */
@@ -50,10 +50,13 @@ export function mountNavigation(ctx: ExtensionContext, children: Children, short
     return {
       invalidate() {},
       render(width: number) {
+        if (inspectorShowing()) return []; // The open panel replaces the editor and this bar.
         const list = children.history.list(), running = list.filter(isActiveRun).length;
-        const agents = `${running} agents running · ${list.length - running} saved`;
-        const label = (page: InspectorPage, text: string) => theme.fg(navigation.selected === page ? 'accent' : 'dim', `${navigation.selected === page ? '› ' : ''}${text}`);
-        return [truncateToWidth(`${label('agents', agents)}  |  ${label('usage', 'Usage')}  · ${navigation.selected ? '←→ select · Enter open · Esc input' : `${previous ? '' : '↓ select · '}${shortcut} inspect`}`, width)];
+        const label = (page: InspectorPage, text: string) => navigation.selected === page ? theme.fg('accent', `› ${text}`) : theme.fg('muted', text);
+        const left = `${label('agents', `Agents: ${running} running · ${list.length - running} saved`)}   ${label('usage', 'Usage')}`;
+        const hint = theme.fg('dim', navigation.selected ? '←→ select · Enter open · Esc input' : `${previous ? '' : '↓ select · '}${shortcut} inspect`);
+        const gap = width - visibleWidth(left) - visibleWidth(hint);
+        return [truncateToWidth(gap >= 3 ? `${left}${' '.repeat(gap)}${hint}` : `${left}   ${hint}`, width)];
       },
     };
   }, { placement: 'belowEditor' });

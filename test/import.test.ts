@@ -1,13 +1,13 @@
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { Memory, localDay, type Compressor } from '../src/memory.ts';
-import { scanLocal, scanChatGPT, readConversation, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
+import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
 import { prepareImport, runImport, memoryDirectory, pendingImport, discardImport, deduplicate, chronological } from '../src/import/job.ts';
 import { chooseImport, showProgress } from '../src/import/ui.ts';
 
@@ -268,6 +268,37 @@ test('ChatGPT ZIP reads numbered conversation files without extracting other arc
     const parsed = await readConversation(scan.conversations[0]); assert.equal(parsed.entries.length, 1);
     assert.match(parsed.entries[0].text, /zip fixture message/); assert.equal(existsSync(file), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Claude memories import each topic file once as a dated note, and an edited file as a newer note', async () => {
+  const root = temp(), alpha = join(root, '-tmp-alpha'), beta = join(root, '-work-beta');
+  for (const dir of [join(alpha, 'memory'), join(alpha, 'session', 'session-memory'), join(beta, 'memory')]) mkdirSync(dir, { recursive: true });
+  lines(join(alpha, 'session.jsonl'), [{ type: 'user', cwd: '/tmp/alpha', message: { role: 'user', content: 'hi' } }]);
+  writeFileSync(join(alpha, 'memory', 'MEMORY.md'), '- [Deploys](feedback_deploys.md) INDEX ONLY\n');
+  writeFileSync(join(alpha, 'session', 'session-memory', 'summary.md'), 'SESSION SUMMARY\n');
+  const deploys = join(alpha, 'memory', 'feedback_deploys.md');
+  writeFileSync(deploys, '---\nname: Deploys\ndescription: "Never deploy on \\"Fridays\\""\ntype: feedback\nmodified: 2026-03-04T05:06:07.000Z\n---\nWait until Monday.\n');
+  const pr = join(beta, 'memory', 'project_pr.md');
+  writeFileSync(pr, '---\nname: PR status\ndescription: Tracking PR\nmetadata:\n  type: project\n---\nPR #7023 is open.\n');
+  utimesSync(pr, new Date(date), new Date(date));
+  try {
+    const scan = await scanClaudeMemories(root);
+    assert.deepEqual(scan.warnings, []);
+    const read = async () => (await Promise.all(scan.conversations.map(c => readConversation(c)))).flatMap(p => p.entries);
+    const first = await read();
+    assert.deepEqual(first.map(e => [e.kind, e.date, e.origin?.project, e.origin?.title]), [
+      ['note', '2026-03-04T05:06:07.000Z', '/tmp/alpha', 'Deploys'],
+      ['note', date, '-work-beta', 'PR status'],
+    ]);
+    assert.equal(first[0].text, '[Historical Claude Code memory · 2026-03-04T05:06:07.000Z · project /tmp/alpha · type feedback · Deploys]\nNever deploy on "Fridays"\n\nWait until Monday.');
+    assert.match(first[1].text, /project -work-beta · type project · PR status\]\nTracking PR\n\nPR #7023 is open\.$/);
+    assert.doesNotMatch(JSON.stringify(first), /INDEX ONLY|SESSION SUMMARY/);
+    const existing = first.map((e, i) => ({ ...e, i, size: 0 }));
+    assert.deepEqual(deduplicate(existing, await read()), { added: [], skipped: 2 });
+    writeFileSync(pr, readFileSync(pr, 'utf8').replace('is open', 'is merged'));
+    const { added } = deduplicate(existing, await read());
+    assert.equal(added.length, 1); assert.match(added[0].text, /PR #7023 is merged/); assert.ok(added[0].date > date, 'edited note is dated by the read, not the scan');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('append activates only after complete indexing, retains original summaries, and repeated imports add nothing', async () => {

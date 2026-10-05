@@ -11,7 +11,8 @@ import { createCompressor } from './compactor.ts';
 import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, type ProfileConfig } from './profiles.ts';
 import { MASTER, VIEW_DOC } from './prompts.ts';
 import { cacheFor, record } from './cache.ts';
-import { boundedMessage, buildContext, logMessage, textContent } from './transcript.ts';
+import { asUser, boundedMessage, buildContext, logMessage, REPORT_TYPE, textContent } from './transcript.ts';
+import { registerReportRenderer } from './report-message.ts';
 import { memoryTools, result } from './tools.ts';
 import { Children } from './agents.ts';
 import { exportBrowser } from './browser.ts';
@@ -22,6 +23,7 @@ import { chooseImport, showProgress } from './import/ui.ts';
 import { IMPORT_GUIDANCE } from './import/guidance.ts';
 import { UsageLedger } from './usage.ts';
 import { showInspector, type InspectorPage } from './inspector.ts';
+import { showAgentView } from './agent-view.ts';
 import { inspectorShortcut, mountNavigation } from './navigation.ts';
 
 const binding = 'optchat.profile';
@@ -69,9 +71,15 @@ export default function optchat(pi: ExtensionAPI) {
       }
     }
   };
+  // Shown as a dark background box, not as the user's own message. Before this profile has run once there is no
+  // built system prompt to reuse, so that rare case still goes through Pi's normal prompt path as a user message.
+  const sendReport = (text: string) => {
+    if (prompt) pi.sendMessage({ customType: REPORT_TYPE, content: text, display: true }, { triggerTurn: true, deliverAs: 'steer' });
+    else pi.sendUserMessage(text, { deliverAs: 'steer', expandPromptTemplates: false });
+  };
   const deliverReport = async (text: string) => {
     reports.push(text); saveReports();
-    if (!stopping) pi.sendUserMessage(text, { deliverAs: 'steer', expandPromptTemplates: false });
+    if (!stopping) sendReport(text);
   };
   const stop = async () => {
     inspectorController?.abort(); unmountNavigation?.(); unmountNavigation = undefined;
@@ -84,7 +92,7 @@ export default function optchat(pi: ExtensionAPI) {
       await checkpoint(old.dir);
     } finally {
       await old.memory.close(); await old.unlock(); active = undefined;
-      run = []; logged = 0; view = undefined; runStarted = false; receipts.clear();
+      run = []; logged = 0; view = undefined; runStarted = false; receipts.clear(); prompt = '';
     }
   };
   const chooseProfile = async (ctx: ExtensionContext): Promise<string | undefined> => {
@@ -129,7 +137,7 @@ export default function optchat(pi: ExtensionAPI) {
       status(ctx);
       ctx.ui.notify(`OptChat · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})`, 'info');
       const queuedReports = [...reports];
-      setImmediate(() => { if (active?.memory === memory && !pendingImport(dir)) for (const text of queuedReports) pi.sendUserMessage(text, { deliverAs: 'steer', expandPromptTemplates: false }); });
+      setImmediate(() => { if (active?.memory === memory && !pendingImport(dir)) for (const text of queuedReports) sendReport(text); });
     } catch (error) {
       if (active && active.memory === openingMemory) {
         unmountNavigation?.(); unmountNavigation = undefined;
@@ -168,14 +176,21 @@ export default function optchat(pi: ExtensionAPI) {
     }
     return { action: 'continue' };
   });
-  pi.on('before_agent_start', () => {
-    flush(); run = []; logged = 0; view = undefined; runStarted = true;
+  const startRun = () => { flush(); run = []; logged = 0; view = undefined; runStarted = true; };
+  // A report sent while Pi is idle starts its run without before_agent_start; it reuses the last built prompt.
+  pi.on('agent_start', () => { if (active && !runStarted) startRun(); });
+  pi.on('before_agent_start', event => {
+    startRun();
     const a = required();
-    prompt = `${MASTER}\n\n${VIEW_DOC}\n\n${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
+    // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
+    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}`;
+    event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
+    prompt = event.systemPrompt;
   });
   pi.on('message_end', (event, ctx) => {
     if (!active || !runStarted) return;
-    const message = boundedMessage(event.message);
+    const bounded = boundedMessage(event.message);
+    const message = asUser(bounded);
     if (message.role === 'user') {
       try {
         const text = textContent(message.content);
@@ -192,7 +207,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (view !== undefined) {
       try { flush(); } catch (error) { ctx.abort(); fault = errorText(error); ctx.ui.notify(fault, 'error'); }
     }
-    if (message !== event.message) return { message };
+    if (bounded !== event.message) return { message: bounded };
   });
   pi.on('context_with_system', async (event, ctx) => {
     try {
@@ -242,10 +257,11 @@ export default function optchat(pi: ExtensionAPI) {
       await checkpoints;
     }
   });
+  registerReportRenderer(pi);
   for (const tool of memoryTools(() => required().memory)) pi.registerTool(tool);
   pi.registerTool({ name: 'spawn', label: 'Spawn background agents',
     description: 'Start one background subagent per task, in parallel, returning IDs immediately. Use only when the user asks. Each receives the current memory view and read-only zoom/date. When all of this spawn\'s subagents finish, their reports arrive together as one message; never poll or sleep waiting for them. Put independent work in separate spawns. The profile allows 8 active agents.',
-    parameters: Type.Object({ tasks: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }) }),
+    parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: 'Project directory the subagent works in; its AGENTS.md files load from there. Defaults to the main chat\'s directory.' })) }), { minItems: 1, maxItems: 8 }) }),
     async execute(_id, args, signal, _update, ctx) {
       const ids = await required().children.spawn(args.tasks, ctx.cwd, signal); status(ctx);
       return result(`Started: ${ids.join(', ')}. Reports will arrive automatically.`);
@@ -280,7 +296,9 @@ export default function optchat(pi: ExtensionAPI) {
       const action = await showInspector(ctx, { profile: a.name, session: ctx.sessionManager.getSessionId(), children: a.children, usage: a.usage, page, signal,
         refreshUsage: () => { collectUsage(ctx); try { a.children.collectUsage(); } catch (error) { ctx.ui.notify(`Could not save child usage: ${errorText(error)}`, 'error'); } },
       });
-      if (action === 'model' && !signal.aborted) await pickModel(ctx, 'subagent');
+      if (signal.aborted) return;
+      if (action === 'model') await pickModel(ctx, 'subagent');
+      else if (action) await showAgentView(ctx, { id: action.open, children: a.children, signal });
     } catch (error) { ctx.ui.notify(errorText(error), 'error'); }
     finally { if (inspectorController === controller) inspectorController = undefined; }
   };

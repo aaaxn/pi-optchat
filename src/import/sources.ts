@@ -145,8 +145,85 @@ export async function scanChatGPT(input: string, signal?: AbortSignal): Promise<
   return { conversations: conversations.sort((a, b) => b.date.localeCompare(a.date)), warnings };
 }
 
+/** Claude Code auto memory: one note per topic file. MEMORY.md is only an index of those files. */
+export async function scanClaudeMemories(root = join(homedir(), '.claude/projects'), signal?: AbortSignal): Promise<Scan> {
+  const conversations: Conversation[] = [], warnings: string[] = [];
+  const dirs = await readdir(root, { withFileTypes: true }).catch(error => { if (missingSource(error)) return []; throw error; });
+  for (const dir of dirs.filter(d => d.isDirectory()).map(d => d.name).sort()) {
+    signal?.throwIfAborted();
+    const folder = join(root, dir, 'memory');
+    const files = (await readdir(folder, { withFileTypes: true }).catch(error => { if (missingSource(error)) return []; throw error; }))
+      .filter(f => f.isFile() && f.name.endsWith('.md') && f.name !== 'MEMORY.md').map(f => f.name).sort();
+    if (!files.length) continue;
+    const project = await claudeProject(join(root, dir), dir, signal);
+    for (const name of files) {
+      const file = join(folder, name);
+      try {
+        const [info, content] = await Promise.all([stat(file), readFile(file, { encoding: 'utf8', signal })]);
+        const { fields } = frontmatter(content);
+        conversations.push({ source: 'claude-memory', id: `${dir}/${name}`, file, project, size: info.size,
+          title: fields.get('name') ?? basename(name, '.md'), date: timestamp(fields.get('modified'), info.mtime.toISOString()) });
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (!missingSource(error)) throw error;
+        warnings.push(`${file}: memory file is no longer available; skipped.`);
+      }
+    }
+  }
+  return { conversations: conversations.sort((a, b) => b.date.localeCompare(a.date)), warnings };
+}
+/** Claude names project folders after the launch directory with every other character replaced by '-'. Recover it from a transcript. */
+async function claudeProject(folder: string, name: string, signal?: AbortSignal): Promise<string> {
+  const transcripts = (await readdir(folder)).filter(f => f.endsWith('.jsonl')).sort();
+  for (const transcript of transcripts) {
+    try {
+      for await (const { value } of jsonLines(join(folder, transcript), [], 60, signal)) {
+        const cwd = string(value.cwd);
+        if (cwd && cwd.replace(/[^a-zA-Z0-9]/g, '-') === name) return cwd;
+      }
+    } catch (error) { signal?.throwIfAborted(); if (!missingSource(error)) throw error; }
+  }
+  return name; // Transcripts can be cleaned up while memory remains.
+}
+function frontmatter(content: string) {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(content);
+  const fields = new Map<string, string>();
+  for (const line of match ? match[1].split(/\r?\n/) : []) {
+    // Newer files nest type/modified under `metadata:`; the first occurrence of each key wins.
+    const m = /^\s*([A-Za-z]+):\s*(.+?)\s*$/.exec(line);
+    if (m && !fields.has(m[1])) fields.set(m[1], unquote(m[2]));
+  }
+  return { fields, body: match ? content.slice(match[0].length) : content };
+}
+function unquote(value: string): string {
+  if (value.startsWith('"')) { try { const parsed: unknown = JSON.parse(value); if (typeof parsed === 'string') return parsed; } catch { /* plain text */ } }
+  if (/^'.*'$/.test(value)) return value.slice(1, -1).replaceAll("''", "'");
+  return value;
+}
+async function readMemory(c: Conversation, signal?: AbortSignal): Promise<{ entries: ImportedEntry[]; warnings: string[] }> {
+  let content: string, modified: Date;
+  try { [content, { mtime: modified }] = await Promise.all([readFile(c.file, { encoding: 'utf8', signal }), stat(c.file)]); } catch (error) {
+    signal?.throwIfAborted();
+    if (!missingSource(error)) throw error;
+    return { entries: [], warnings: [`${c.file}: memory file is no longer available; skipped.`] };
+  }
+  const { fields, body } = frontmatter(content);
+  if (!body.trim()) return { entries: [], warnings: [] };
+  const one = (s: string) => s.replace(/\s+/g, ' ').trim();
+  const name = one(fields.get('name') ?? c.title), type = fields.get('type'), description = fields.get('description');
+  // The whole file is the identity, so an edited memory arrives as a newer note and an unchanged one is skipped.
+  const hash = digest(content);
+  // Date the note from this read, not the earlier scan, in case Claude edited the file meanwhile.
+  const date = timestamp(fields.get('modified'), modified.toISOString());
+  return { warnings: [], entries: [{ kind: 'note', date,
+    origin: { source: c.source, conversation: c.id, message: hash.slice(0, 16), title: name, project: c.project },
+    text: `[Historical Claude Code memory · ${date} · project ${c.project}${type ? ` · type ${one(type)}` : ''} · ${name}]\n${description ? one(description) + '\n\n' : ''}${body.trim()}`,
+    receipt: `import:${digest(JSON.stringify([c.source, c.id, hash]))}` }] };
+}
+
 export async function readConversation(c: Conversation, signal?: AbortSignal): Promise<{ entries: ImportedEntry[]; warnings: string[] }> {
   signal?.throwIfAborted();
+  if (c.source === 'claude-memory') return readMemory(c, signal);
   const entries: ImportedEntry[] = [], warnings: string[] = [];
   const add = (id: string, kind: Kind, value: string, date: string, identity = value) => { const entry = imported(c, id, kind, value, date, identity); if (entry) entries.push(entry); };
   if (c.source === 'chatgpt') {

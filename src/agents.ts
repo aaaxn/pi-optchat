@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { join, dirname, resolve } from 'node:path';
+import { Type } from 'typebox';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, getAgentDir, type AgentSession, type AgentSessionEvent, type ModelRegistry } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { SUBAGENT, VIEW_DOC } from './prompts.ts';
-import { memoryTools } from './tools.ts';
+import { memoryTools, result } from './tools.ts';
 import { type Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
 import { cacheFor } from './cache.ts';
@@ -16,9 +17,19 @@ export interface LiveRun {
   session: AgentSession; info: RunInfo; updated: number; streaming?: AgentMessage;
   tools: Map<string, { name: string; args: unknown; output?: unknown; started: number }>;
 }
+export interface SpawnTask { task: string; cwd?: string }
 interface Options { parentSession?: string; usage?: UsageLedger; createSession?: typeof createAgentSession }
 
-export const webExtension = join(dirname(fileURLToPath(import.meta.url)), '../node_modules/pi-web-access/dist/index.js');
+// Subagents load the user's installed extensions, except any copy of OptChat itself: they get memory tools directly and must not open a profile.
+const packageName = (path: string): string | undefined => {
+  for (let dir = dirname(path); dir !== dirname(dir); dir = dirname(dir)) {
+    const manifest = join(dir, 'package.json');
+    if (!existsSync(manifest)) continue;
+    const data: unknown = JSON.parse(readFileSync(manifest, 'utf8'));
+    return data && typeof data === 'object' && 'name' in data && typeof data.name === 'string' ? data.name : undefined;
+  }
+};
+const isOptchat = (path: string) => packageName(path) === 'pi-optchat';
 export class Children {
   private readonly running = new Map<string, LiveRun>();
   readonly history: RunHistory;
@@ -75,7 +86,10 @@ export class Children {
       this.changed();
     } catch (error) { this.warn(`Could not record subagent activity: ${String(error)}`); }
   }
-  async spawn(tasks: string[], cwd: string, signal?: AbortSignal) {
+  async spawn(tasks: SpawnTask[], cwd: string, signal?: AbortSignal) {
+    // Each child starts in its project, so Pi loads that project's AGENTS.md files for it.
+    const directories = tasks.map(t => resolve(cwd, t.cwd ?? '.'));
+    for (const directory of directories) if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new Error(`No such directory: ${directory}`);
     if (this.closing) throw new Error('Profile is closing.');
     this.settling++;
     try { await this.memory.settle(signal); } finally { this.settling--; }
@@ -85,33 +99,39 @@ export class Children {
     const selected = this.choice();
     const model = this.registry.find(selected.provider, selected.model);
     if (!model) throw new Error(`Subagent model unavailable: ${selected.provider}/${selected.model}`);
-    const prompt = `${SUBAGENT}\n\n${VIEW_DOC}\n\n${this.instructions()}`;
+    const instructions = `${this.instructions()}\n\nUse tell_parent only when the main agent needs something now (a blocking question, an important early finding, or when asked to). Your final answer is delivered automatically; do not repeat it with tell_parent.`;
     const launched: LiveRun[] = [];
     let reserved = tasks.length;
     this.launching += reserved;
     try {
-      for (const task of tasks) {
+      for (const [n, { task }] of tasks.entries()) {
+        const directory = directories[n];
         signal?.throwIfAborted();
         if (this.closing) throw new Error('Profile is closing.');
         const id = randomUUID().slice(0, 8);
-        const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off' });
-        const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), settingsManager,
-          noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true,
-          additionalExtensionPaths: [webExtension], systemPrompt: prompt,
+        // The user's settings list their installed packages; a copy in memory keeps the child from writing them back.
+        const settingsManager = SettingsManager.inMemory({ ...SettingsManager.create(directory, getAgentDir()).getSettings(), compaction: { enabled: false }, cacheWarming: 'off' });
+        const loader = new DefaultResourceLoader({ cwd: directory, agentDir: getAgentDir(), settingsManager,
+          noPromptTemplates: true,
+          extensionsOverride: base => ({ ...base, extensions: base.extensions.filter(e => !isOptchat(e.resolvedPath)) }),
           extensionFactories: [pi => {
             const provider = this.registry.getRegisteredProviderConfig(selected.provider);
             if (provider) pi.registerProvider(selected.provider, provider);
-            pi.on('before_agent_start', () => ({ systemPrompt: prompt }));
+            // Same prompt as the main agent (AGENTS.md files, skills, cwd); only the OptChat preamble differs.
+            pi.on('before_agent_start', event => {
+              event.systemPromptOptions.customPrompt = `${SUBAGENT}\n\n${VIEW_DOC}`;
+              event.systemPromptOptions.sections.instructions = instructions;
+            });
             pi.on('before_provider_request', (event, ctx) => cacheFor(ctx.model?.api, event.payload));
           }],
         });
         await loader.reload();
-        const { session } = await (this.options.createSession ?? createAgentSession)({ cwd, resourceLoader: loader, settingsManager,
-          model, thinkingLevel: selected.thinking, sessionManager: SessionManager.create(cwd, join(this.profileDirectory, 'runs')),
-          customTools: memoryTools(() => this.memory),
+        const { session } = await (this.options.createSession ?? createAgentSession)({ cwd: directory, resourceLoader: loader, settingsManager,
+          model, thinkingLevel: selected.thinking, sessionManager: SessionManager.create(directory, join(this.profileDirectory, 'runs')),
+          customTools: [...memoryTools(() => this.memory), this.parentTool(id)],
         });
         await session.bindExtensions({});
-        const info: RunInfo = { id, task, cwd, model: `${selected.provider}/${selected.model}`, thinking: session.thinkingLevel,
+        const info: RunInfo = { id, task, cwd: directory, model: `${selected.provider}/${selected.model}`, thinking: session.thinkingLevel,
           parentSession: this.options.parentSession ?? '', sessionFile: session.sessionFile, started: Date.now(), state: 'running', guidance: [] };
         const live: LiveRun = { session, info, updated: Date.now(), tools: new Map() };
         launched.push(live); this.save(info); this.running.set(id, live);
@@ -136,6 +156,18 @@ export class Children {
     this.completions.add(work);
     this.changed();
     return launched.map(c => c.info.id);
+  }
+  /** Lets a child message the main agent mid-run, the way tell lets the main agent guide it. */
+  private parentTool(id: string) {
+    return { name: 'tell_parent', label: 'Message main agent',
+      description: 'Send the main agent a question or important finding while you keep working. Its reply can arrive as guidance; continue useful work instead of polling. Your final answer is delivered automatically.',
+      parameters: Type.Object({ message: Type.String() }), execute: async (_id: string, args: { message: string }) => {
+        const message = args.message.trim();
+        if (!message) throw new Error('Message is empty.');
+        await this.report(`[${id}] Message from subagent (still running): ${message}`);
+        return result('Message sent to the main agent.');
+      },
+    };
   }
   private async execute(live: LiveRun, view: string) {
     const { session, info } = live;
@@ -173,7 +205,7 @@ export class Children {
     if (!live || live.info.state !== 'running') throw new Error(`No running subagent ${id}.`);
     const text = message.trim(); if (!text) throw new Error('Message is empty.');
     if (source === 'user') this.memory.append('user', `Direct guidance to subagent [${id}]: ${text}`);
-    const guidance: RunInfo['guidance'][number] = { text, date: Date.now(), state: 'queued' };
+    const guidance: RunInfo['guidance'][number] = { text, date: Date.now(), state: 'queued', from: source };
     live.info.guidance.push(guidance); this.save(live.info);
     try { await live.session.steer(text); }
     catch (error) { guidance.state = 'undelivered'; this.save(live.info); throw error; }

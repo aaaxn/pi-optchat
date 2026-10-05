@@ -210,3 +210,55 @@ test('a skill command is logged once, as its expansion, and never recovered as a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('main agent keeps Pi\'s AGENTS.md files and skills, with profile instructions last', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-prompt-'));
+  const agentDir = join(dir, 'agent');
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    const profile = profilePath('fixture');
+    saveConfig(profile, { ...loadConfig(profile), compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    writeFileSync(join(profile, 'AGENTS.md'), 'PROFILE_RULES');
+    mkdirSync(join(agentDir, 'skills', 'demo-skill'), { recursive: true });
+    writeFileSync(join(agentDir, 'skills', 'demo-skill', 'SKILL.md'), '---\nname: demo-skill\ndescription: Demo skill.\n---\nBody');
+    writeFileSync(join(agentDir, 'AGENTS.md'), 'GLOBAL_RULES');
+    writeFileSync(join(dir, 'AGENTS.md'), 'REPO_RULES');
+    const systems: string[] = [];
+    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
+      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+    runtime.registerProvider('fixture', {
+      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+      streamSimple(model, context) {
+        const system = textContent(context.messages.find(m => m.role === 'system')?.content);
+        if (system !== COMPACT) systems.push(system);
+        const reply = answer(system === COMPACT ? 'Summary.' : 'Done.');
+        reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); });
+        return stream;
+      },
+    });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir, settingsManager, noExtensions: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.inMemory(dir);
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
+      resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date', 'read'] })).session;
+    await session.bindExtensions({});
+    await session.prompt('Hello.');
+    const system = systems.at(-1) ?? '';
+    assert.ok(system.includes('demo-skill'), 'skills are listed');
+    const order = ['GLOBAL_RULES', 'REPO_RULES', 'PROFILE_RULES'].map(rule => system.indexOf(rule));
+    assert.ok(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])), 'global, then repo AGENTS.md, then profile instructions last');
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -2,6 +2,9 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { getCurrentSystemMessage, type SystemMessage } from '@earendil-works/pi-ai';
 import { cap, type Memory } from './memory.ts';
 
+/** Subagent traffic to the main agent: a custom message on screen, a plain user message to the model and memory. */
+export const REPORT_TYPE = 'optchat-report';
+
 export function textContent(content: unknown): string {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
@@ -11,6 +14,11 @@ export function textContent(content: unknown): string {
     if ('type' in part && part.type === 'image') return '[image attachment: available in Pi session; text memory does not preserve image bytes]';
     return '';
   }).filter(Boolean).join('\n');
+}
+/** Reports reach the model and memory exactly as the user messages they used to be. */
+export function asUser(message: AgentMessage): AgentMessage {
+  if (message.role !== 'custom' || message.customType !== REPORT_TYPE) return message;
+  return { role: 'user', content: textContent(message.content), timestamp: message.timestamp };
 }
 export function logMessage(memory: Memory, message: AgentMessage, receipt?: string) {
   const date = new Date(message.timestamp).toISOString();
