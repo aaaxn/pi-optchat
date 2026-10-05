@@ -23,8 +23,14 @@ export class Inbox {
     const item = { id: randomUUID(), text, date: new Date().toISOString() };
     this.items.push(item); this.save(); return item.id;
   }
-  claim(text: string) {
-    const item = this.items.find(i => !this.claimed.has(i.id) && i.text === text);
+  claim(text: string) { return this.claimWhere(i => i.text === text); }
+  /** Pi expands `/skill:name args` after the input is journaled; match the expansion back to that input. */
+  claimSkill(name: string, args = '') {
+    const command = `/skill:${name}`;
+    return this.claimWhere(i => i.text.startsWith(command) && /^(\s|$)/.test(i.text.slice(command.length)) && i.text.slice(command.length).trim() === args);
+  }
+  private claimWhere(match: (item: Arrival) => boolean) {
+    const item = this.items.find(i => !this.claimed.has(i.id) && match(i));
     if (!item) return undefined;
     this.claimed.add(item.id); return item.id;
   }

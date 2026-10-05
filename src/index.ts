@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { createHash } from 'node:crypto';
 import type { AgentMessage, ThinkingLevel } from '@earendil-works/pi-agent-core';
-import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
+import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { createCompressor } from './compactor.ts';
@@ -181,7 +181,8 @@ export default function optchat(pi: ExtensionAPI) {
         const text = textContent(message.content);
         if (reports.includes(text)) receipts.set(message, reportReceipt(text));
         else {
-          let receipt = active.inbox.claim(text);
+          const skill = parseSkillBlock(text);
+          let receipt = active.inbox.claim(text) ?? (skill ? active.inbox.claimSkill(skill.name, skill.userMessage) : undefined);
           if (!receipt) { active.inbox.record(text); receipt = active.inbox.claim(text); }
           if (receipt) receipts.set(message, receipt);
         }
