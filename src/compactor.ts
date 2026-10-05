@@ -8,7 +8,7 @@ import { IMPORT_GUIDANCE } from './import/guidance.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
 /** Recipe §4.2: a realistic, dense line of exactly NODE bytes, tagged with kinds. No ids or numbers: the compactor copies them. */
-export const SCALE = 'user: Keep work and personal memory separate; use a binary summary tree and inspect original messages before acting. talk: Implemented the append-only log with durable writes and a stable view. tool: ran the test suite; echo: all pass except cancellation, which hangs on abort. user: Main agent uses a large model, compactor a small one at medium effort. work: Worker finished the parser; tests cover invalid records and repeated imports. talk: The browser opens original messages, keeping the dates and sources.';
+export const SCALE = 'user: Keep work and personal memory separate; use a binary summary tree and inspect original messages before acting. talk: Implemented the append-only log with durable writes and a stable view. tool: ran the test suite; echo: one failure, a timezone test that assumes UTC time. user: Main agent uses a large model, compactor a small one at medium effort. work: Worker finished the parser; tests cover invalid records and repeated imports. talk: The browser opens original messages, keeping the dates and sources.';
 export function createCompressor(registry: ModelRegistry, choice: () => ModelChoice,
   onUsage: (message: AssistantMessage) => void = () => {}): Compressor {
   return async (input, signal) => {
