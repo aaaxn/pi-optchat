@@ -281,8 +281,7 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('agent_settled', async (_event, ctx) => {
     collectUsage(ctx);
     try { flush(); } catch (error) { fault = errorText(error); ctx.ui.notify(fault, 'error'); }
-    runStarted = false; status(ctx);
-    working = false; showTitle(ctx);
+    runStarted = false; working = false; showTitle(ctx); status(ctx);
     if (active) {
       const dir = active.dir;
       checkpoints = checkpoints.then(() => checkpoint(dir)).catch(error => ctx.ui.notify(`Local checkpoint failed: ${errorText(error)}`, 'error'));
