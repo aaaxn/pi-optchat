@@ -194,10 +194,10 @@ export default function optchat(pi: ExtensionAPI) {
     }
     return { action: 'continue' };
   });
-  pi.on('before_agent_start', (_event, ctx) => {
+  pi.on('before_agent_start', () => {
     flush(); run = []; logged = 0; view = undefined; runStarted = true;
     const a = required();
-    prompt = `${MASTER}\n\n${VIEW_DOC}\n\n${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}\n\nWorking directory: ${ctx.cwd}`;
+    prompt = `${MASTER}\n\n${VIEW_DOC}\n\n${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
   });
   pi.on('message_end', (event, ctx) => {
     if (!active || !runStarted) return;
