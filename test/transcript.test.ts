@@ -8,7 +8,7 @@ import { createAssistantMessageEventStream, type AssistantMessage, type Context,
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
-import { buildContext, previousExchange, RUN_BOUNDARY, textContent } from '../src/transcript.ts';
+import { buildContext, textContent } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 
@@ -17,73 +17,23 @@ const answer = (text: string, stopReason: AssistantMessage['stopReason'] = 'stop
   role: 'assistant', content: [{ type: 'text', text }], timestamp: 2, stopReason,
   api: 'openai-completions', provider: 'fixture', model: 'fixture', usage: emptyUsage(),
 });
-function appendRun(manager: SessionManager, messages: Parameters<SessionManager['appendMessage']>[0][], settled = true) {
-  manager.appendCustomEntry(RUN_BOUNDARY, { state: 'start' });
-  for (const message of messages) manager.appendMessage(message);
-  if (settled) manager.appendCustomEntry(RUN_BOUNDARY, { state: 'end' });
-}
-
-test('retain the exact last answer and its requests, excluding prior working context', () => {
-  const first = user('Compare the options.');
-  const steering = user([{ type: 'text', text: 'Focus on option two.' }, { type: 'image', data: 'image-bytes', mimeType: 'image/png' }]);
-  const finalText = 'Second option: preserve original wording.\n' + 'Detailed explanation. '.repeat(70);
-  const final = answer(finalText);
-  final.content.unshift({ type: 'thinking', thinking: 'OLD PRIVATE REASONING' });
+test('context holds the view and the current run only, never an earlier exchange', () => {
   const toolResult: AgentMessage = { role: 'toolResult', toolCallId: 'read', toolName: 'read',
     content: [{ type: 'text', text: 'OLD TOOL OUTPUT' }], isError: false, timestamp: 1 };
-  const history = [user('Older question'), answer('Older answer'), first, answer('Checking.', 'toolUse'), toolResult, steering, final];
-  const manager = SessionManager.inMemory();
-  appendRun(manager, history.slice(0, 2));
-  appendRun(manager, history.slice(2));
-  const previous = previousExchange(manager.getBranch());
-  assert.deepEqual(previous.map(m => textContent(m.content)), [
-    first.content, 'Focus on option two.\n[image attachment: available in Pi session; text memory does not preserve image bytes]', finalText,
-  ]);
+  const history = [user('Older question'), answer('Older answer'), toolResult, answer('Second option. ' + 'Detail. '.repeat(70))];
   const current = user('Why is that?');
   const thinking = answer('Working on the follow-up.');
   thinking.content.unshift({ type: 'thinking', thinking: 'CURRENT REASONING' });
-  const context = buildContext([...history, current, thinking], [current, thinking], '<chat>\nsummary\n</chat>', 'instructions', previous);
-  assert.deepEqual(context.map(m => m.role), ['system', 'user', 'user', 'assistant', 'user', 'assistant']);
-  assert.ok(context[3].role === 'assistant');
-  assert.equal(textContent(context[3].content), finalText);
-  assert.equal(context.at(-1), thinking);
+  const context = buildContext([...history, current, thinking], [current, thinking], '<chat>\nsummary\n</chat>', 'instructions');
+  assert.deepEqual(context.map(m => m.role), ['system', 'user', 'assistant']);
   assert.ok(context[1].role === 'user');
-  assert.match(textContent(context[1].content), /^<chat>\nsummary\n<\/chat>/);
-  assert.doesNotMatch(JSON.stringify(context), /OLD PRIVATE REASONING|OLD TOOL OUTPUT|Older question|Older answer|image-bytes/);
-  assert.throws(() => buildContext(history, [], 'view', 'prompt', previous), /no current user message/);
-  assert.equal(final.content[0].type, 'thinking', 'the saved transcript must not be mutated');
+  assert.equal(textContent(context[1].content), '<chat>\nsummary\n</chat>\nWhy is that?');
+  assert.equal(context.at(-1), thinking);
+  assert.doesNotMatch(JSON.stringify(context), /OLD TOOL OUTPUT|Older question|Older answer|Second option/);
+  assert.throws(() => buildContext(history, [], 'view', 'prompt'), /no current user message/);
 });
 
-test('unsuccessful or unsettled runs preserve the earlier completed exchange', () => {
-  const completed = [user('Earlier'), answer('Earlier answer')];
-  for (const reason of ['error', 'aborted', 'length', 'toolUse'] as const) {
-    const manager = SessionManager.inMemory();
-    appendRun(manager, completed);
-    appendRun(manager, [user('New task'), answer('Partial', reason)]);
-    assert.deepEqual(previousExchange(manager.getBranch()), completed);
-  }
-  const manager = SessionManager.inMemory();
-  appendRun(manager, completed);
-  appendRun(manager, [user('Unanswered')], false);
-  assert.deepEqual(previousExchange(manager.getBranch()), completed);
-  manager.appendMessage(answer('Text-only response before a crash or pending steering'));
-  assert.deepEqual(previousExchange(manager.getBranch()), completed);
-  const orphan = SessionManager.inMemory();
-  appendRun(orphan, [answer('Unpaired answer')]);
-  assert.deepEqual(previousExchange(orphan.getBranch()), []);
-  assert.deepEqual(previousExchange([]), []);
-});
-
-test('legacy sessions recover the last successful exchange before run markers were available', () => {
-  const manager = SessionManager.inMemory();
-  const completed = [user('Earlier'), answer('Earlier answer')];
-  for (const message of [...completed, user('Failed task'), answer('Partial', 'error')]) manager.appendMessage(message);
-  assert.deepEqual(previousExchange(manager.getBranch()), completed);
-  appendRun(manager, [user('Unanswered')], false);
-  assert.deepEqual(previousExchange(manager.getBranch()), completed);
-});
-
-test('real Pi lifecycle retains one exchange across tool calls and resume, without replaying it into memory', async () => {
+test('real Pi lifecycle starts every turn from the view alone, across tool calls, steering, and resume', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-context-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = dir;
@@ -110,8 +60,8 @@ test('real Pi lifecycle retains one exchange across tool calls and resume, witho
         snapshot.messages = snapshot.messages.filter(m => m.role !== 'system');
         if (!compression) captured.push(snapshot);
         const latest = context.messages.at(-1);
-        const text = textContent(latest?.content);
-        const reply = answer(compression ? 'Summary of fixture exchanges.' : latest?.role === 'toolResult' ? 'Because Append preserves existing summaries.' : `Answer to: ${text.split('</chat>').at(-1)?.trim()}`);
+        const text = textContent(latest?.content).split('</chat>').at(-1)!.trim();
+        const reply = answer(compression ? 'Summary of fixture exchanges.' : latest?.role === 'toolResult' ? 'Because Append preserves existing summaries.' : `Answer to: ${text}`);
         reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
         if (text === 'Why is that?') {
           reply.stopReason = 'toolUse';
@@ -133,10 +83,13 @@ test('real Pi lifecycle retains one exchange across tool calls and resume, witho
         return stream;
       },
     });
+    const marker = (pi: Parameters<typeof optchat>[0]) => {
+      pi.on('agent_before_settle', event => ({ entries: [...event.entries, { type: 'custom', customType: 'marker' }] }));
+    };
     const open = async (manager: SessionManager) => {
       const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
       const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
-        noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+        noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [marker, optchat] });
       await loader.reload();
       const created = await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
         resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date'] });
@@ -154,53 +107,54 @@ test('real Pi lifecycle retains one exchange across tool calls and resume, witho
     let active = await open(manager);
     await active.prompt('Should I append?');
     assert.equal(captured[0].messages.length, 1);
-    const firstAnswer = active.getLastAssistantText();
     await active.prompt('Why is that?');
     const followUp = captured[1].messages;
-    assert.deepEqual(followUp.map(m => m.role), ['user', 'assistant', 'user']);
-    assert.equal(textContent(followUp[1].content), firstAnswer);
-    assert.deepEqual(captured[2].messages.slice(0, 3), followUp, 'previous exchange must stay frozen during tools');
+    assert.deepEqual(followUp.map(m => m.role), ['user'], 'a new turn carries no earlier exchange');
+    assert.deepEqual(captured[2].messages[0], followUp[0], 'the view must stay frozen during tools');
     assert.ok(captured[2].messages.some(m => m.role === 'toolResult'));
     await active.prompt('Okay.');
-    assert.deepEqual(captured[3].messages.map(m => m.role), ['user', 'assistant', 'user']);
-    assert.equal(textContent(captured[3].messages[1].content), 'Because Append preserves existing summaries.');
-    assert.ok(!captured[3].messages.some(m => m.role === 'toolResult'));
+    assert.deepEqual(captured[3].messages.map(m => m.role), ['user']);
     const saved = manager.getSessionFile(); assert.ok(saved);
     await close();
     active = await open(SessionManager.open(saved));
     await active.prompt('Explain that answer.');
-    assert.equal(textContent(captured[4].messages[1].content), 'Answer to: Okay.');
+    assert.deepEqual(captured[4].messages.map(m => m.role), ['user'], 'resume must not replay the session transcript');
     const steered = active.prompt('Task with constraints.');
     await steeringStarted;
     await active.steer('Also include tests.');
     releaseSteering();
     await steered;
+    const duringSteering = captured.find(c => textContent(c.messages.at(-1)?.content) === 'Also include tests.')!.messages;
+    assert.deepEqual(duringSteering.map(m => m.role), ['user', 'assistant', 'user'], 'steering stays within its own run');
+    assert.ok(textContent(duringSteering[0].content).endsWith('Task with constraints.'));
     await close();
     active = await open(SessionManager.open(saved));
     await active.prompt('Check constraints.');
-    const afterSteering = captured.at(-1)!.messages;
-    assert.deepEqual(afterSteering.map(m => m.role), ['user', 'user', 'assistant', 'user']);
-    assert.ok(textContent(afterSteering[0].content).endsWith('Task with constraints.'));
-    assert.equal(textContent(afterSteering[1].content), 'Also include tests.');
-    assert.equal(textContent(afterSteering[2].content), 'Answer to: Also include tests.');
+    assert.deepEqual(captured.at(-1)!.messages.map(m => m.role), ['user']);
     await active.prompt('Fail now.');
     assert.equal(active.messages.findLast(m => m.role === 'assistant')?.stopReason, 'error');
     await close();
     active = await open(SessionManager.open(saved));
     await active.prompt('Retry follow-up.');
-    const afterFailure = captured.at(-1)!.messages;
-    assert.deepEqual(afterFailure.map(m => m.role), ['user', 'assistant', 'user']);
-    assert.ok(textContent(afterFailure[0].content).endsWith('Check constraints.'));
-    assert.equal(textContent(afterFailure[1].content), 'Answer to: Check constraints.');
+    assert.deepEqual(captured.at(-1)!.messages.map(m => m.role), ['user']);
     await close();
     const fresh = SessionManager.inMemory(dir);
     fresh.appendCustomEntry('optchat.profile', { name: 'fixture' });
     active = await open(fresh);
     await active.prompt('Fresh session.');
-    assert.equal(captured.at(-1)!.messages.length, 1, 'a new session must not replay another session\'s exchange');
+    assert.equal(captured.at(-1)!.messages.length, 1);
     const main = join(dir, 'profiles', 'fixture', 'main');
     const log = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n'));
     assert.equal(log.length, 23, 'only actual requests, replies, one failure, and tool activity should be logged');
+    assert.deepEqual(errors, []);
+    await active.prompt('Large paste: ' + 'z'.repeat(2_100_000));
+    assert.equal(fresh.getBranch().filter(e => e.type === 'compaction').length, 1, 'a large in-process transcript is dropped');
+    assert.ok(active.messages.length <= 2);
+    await active.prompt('After rotation.');
+    assert.deepEqual(captured.at(-1)!.messages.map(m => m.role), ['user']);
+    assert.match(textContent(captured.at(-1)!.messages[0].content), /After rotation\.$/);
+    assert.equal(fresh.getBranch().filter(e => e.type === 'compaction').length, 1, 'a small transcript is kept');
+    assert.equal(fresh.getBranch().filter(e => e.type === 'custom' && e.customType === 'marker').length, 3, 'other extensions keep their settle entries');
     assert.deepEqual(errors, []);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }

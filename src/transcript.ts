@@ -1,10 +1,6 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { SessionEntry } from '@earendil-works/pi-coding-agent';
-import { getCurrentSystemMessage, type SystemMessage, type UserMessage } from '@earendil-works/pi-ai';
+import { getCurrentSystemMessage, type SystemMessage } from '@earendil-works/pi-ai';
 import { cap, type Memory } from './memory.ts';
-import { record } from './cache.ts';
-
-export const RUN_BOUNDARY = 'optchat.run';
 
 export function textContent(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -34,63 +30,13 @@ export function boundedMessage(message: AgentMessage): AgentMessage {
   if (text.length <= 30_000) return message;
   return { ...message, content: [{ type: 'text', text: cap(text) }, ...message.content.filter(c => c.type === 'image')] };
 }
-/** The caller supplies a single settled run, including any steering after text-only replies. */
-function completedExchange(history: readonly AgentMessage[]) {
-  const last = history.findLastIndex(m => m.role === 'user' || m.role === 'assistant');
-  const answer = history[last];
-  if (answer?.role !== 'assistant' || answer.stopReason !== 'stop'
-    || answer.content.some(block => block.type === 'toolCall')) return [];
-  const content = answer.content.flatMap(block => block.type === 'text' ? [{ type: 'text' as const, text: block.text }] : []);
-  if (!content.some(block => block.text.trim())) return [];
-  const requests: UserMessage[] = [];
-  for (const message of history.slice(0, last)) {
-    if (message.role === 'user') requests.push({ ...message, content: textContent(message.content) });
-  }
-  if (!requests.length) return [];
-  return [...requests, { ...answer, content }];
-}
-
-/** Recover the latest successful run on this branch, skipping failed and unfinished runs. */
-export function previousExchange(branch: readonly SessionEntry[]) {
-  let end = -1;
-  let legacyEnd = branch.length;
-  const messages = (entries: readonly SessionEntry[]) => entries.flatMap(entry => entry.type === 'message' ? [entry.message] : []);
-  for (let i = branch.length - 1; i >= 0; i--) {
-    const entry = branch[i];
-    if (entry.type !== 'custom' || entry.customType !== RUN_BOUNDARY || !record(entry.data)) continue;
-    legacyEnd = i;
-    if (entry.data.state === 'end') end = i;
-    else if (entry.data.state === 'start') {
-      if (end >= 0) {
-        const exchange = completedExchange(messages(branch.slice(i + 1, end)));
-        if (exchange.length) return exchange;
-      }
-      end = -1;
-    }
-  }
-  // Older sessions have no run markers. Recover a successful exchange best-effort;
-  // text-only steering boundaries cannot be reconstructed for those old runs.
-  const legacy = messages(branch.slice(0, legacyEnd));
-  let boundary = 0;
-  let latest: ReturnType<typeof completedExchange> = [];
-  for (let i = 0; i < legacy.length; i++) {
-    const message = legacy[i];
-    if (message.role !== 'assistant' || message.stopReason === 'toolUse') continue;
-    const exchange = completedExchange(legacy.slice(boundary, i + 1));
-    if (exchange.length) latest = exchange;
-    boundary = i + 1;
-  }
-  return latest;
-}
-
-/** Keep one completed exchange plus the current run; all other history comes from the view. */
-export function buildContext(canonical: AgentMessage[], run: AgentMessage[], view: string, prompt: string,
-  previous: readonly AgentMessage[] = []): AgentMessage[] {
+/** Keep only the current run; all earlier history comes from the view. */
+export function buildContext(canonical: AgentMessage[], run: AgentMessage[], view: string, prompt: string): AgentMessage[] {
   const system = getCurrentSystemMessage(canonical);
   const head: SystemMessage = { role: 'system', content: prompt, toolsAdded: system?.toolsAdded, timestamp: 0 };
   if (!run.some(m => m.role === 'user')) throw new Error('OptChat has no current user message; refusing to send historical context.');
   let injected = false;
-  const messages = [...previous, ...run].filter(m => m.role !== 'system').map(message => {
+  const messages = run.filter(m => m.role !== 'system').map(message => {
     if (message.role !== 'user' || injected) return message;
     injected = true;
     return { ...message, content: [{ type: 'text' as const, text: view }, ...(typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content)] };

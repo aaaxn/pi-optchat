@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Memory, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
 import { lockProfile } from '../src/profiles.ts';
-import { splitView, cachePayload } from '../src/cache.ts';
+import { splitView, cachePayload, cacheFor } from '../src/cache.ts';
+import { SCALE } from '../src/compactor.ts';
 import { logMessage, buildContext, boundedMessage } from '../src/transcript.ts';
 import { Inbox } from '../src/inbox.ts';
 import type { ToolResultMessage } from '@earendil-works/pi-ai';
@@ -86,6 +87,25 @@ test('stable cache cuts preserve every character and cap marks at four', () => {
   assert.equal(payload.messages[0].content.map(b => b.text).join(''), view + 'new question');
 });
 
+test('OpenAI requests keep reasoning across turns and send the view unchanged', () => {
+  const view = '<chat>\n' + '0+1|summary of a decision\n'.repeat(5500) + '</chat>';
+  const payload = { instructions: 'system', reasoning: { effort: 'high' },
+    input: [{ role: 'user', content: [{ type: 'input_text', text: view }, { type: 'input_text', text: 'new question' }] }] };
+  cacheFor('openai-codex-responses', payload);
+  assert.equal(payload.input[0].content.length, 2);
+  assert.doesNotMatch(JSON.stringify(payload), /prompt_cache_breakpoint/);
+  assert.deepEqual(payload.reasoning, { effort: 'high', context: 'all_turns' });
+  const plain: Record<string, unknown> = { input: [{ role: 'user', content: [{ type: 'input_text', text: 'hi' }] }] };
+  assert.equal(cacheFor('openai-responses', plain), plain);
+  assert.equal(plain.reasoning, undefined, 'a request without reasoning gets none');
+  assert.equal(cacheFor('google-generative-ai', payload), payload);
+});
+
+test('the compactor scale line is exactly one node long', () => {
+  assert.equal(bytes(SCALE), 512);
+  assert.doesNotMatch(SCALE, /\.{3,}$/);
+});
+
 test('next turn excludes old conversation; current tool loop and reasoning remain verbatim', async () => {
   const system: SystemMessage = { role: 'system', content: 'old system', timestamp: 0 };
   const old: UserMessage = { role: 'user', content: 'OLD FULL CONVERSATION', timestamp: 1 };
@@ -126,5 +146,30 @@ test('crash recovery saves unconsumed inputs once, including append-before-ack c
     assert.equal(memory.root.length, 2);
     assert.equal(new Inbox(dir).recover(memory), 0);
     assert.equal(memory.root.length, 2);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('incremental view size and pending count match the rendered view across failures and restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-size-'));
+  let failures = 3;
+  const compress = async (input: Compression) => {
+    if (failures-- > 0) throw new Error('transient');
+    return input.source.slice(0, 120 + input.source.length % 200);
+  };
+  const measured = (memory: Memory) => memory.render().split('\n').slice(1, -1)
+    .reduce((n, line) => n + bytes(line.slice(line.indexOf('|') + 1)), 0);
+  let memory = new Memory(dir, compress, () => {}, 4000, 8, 10);
+  try {
+    for (let i = 0; i < 120; i++) {
+      memory.append(i % 3 ? 'echo' : 'user', `${i} ${'detail '.repeat(i % 7 ? 90 : 2)}`);
+      assert.equal(memory.size, measured(memory), `size after append ${i}`);
+    }
+    await memory.settle(AbortSignal.timeout(5000), true);
+    assert.equal(memory.pending, 0);
+    assert.equal(memory.size, measured(memory));
+    await memory.close();
+    memory = new Memory(dir, compress, () => {}, 4000, 8, 10);
+    assert.equal(memory.pending, 0);
+    assert.equal(memory.size, measured(memory));
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });

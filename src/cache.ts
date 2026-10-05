@@ -55,3 +55,16 @@ export function cachePayload(payload: unknown): unknown {
   payload.cache_control = { type: 'ephemeral' };
   return payload;
 }
+
+/** OpenAI Responses: keep reasoning across mid-run messages (recipe §8). The view relies on implicit prefix
+ * caching, because the gpt-5.6 models reject explicit prompt_cache_breakpoint marks. */
+export function openaiCachePayload(payload: unknown): unknown {
+  if (record(payload) && record(payload.reasoning)) payload.reasoning = { ...payload.reasoning, context: 'all_turns' };
+  return payload;
+}
+
+export function cacheFor(api: string | undefined, payload: unknown): unknown {
+  if (api === 'anthropic-messages') return cachePayload(payload);
+  if (api === 'openai-responses' || api === 'openai-codex-responses' || api === 'azure-openai-responses') return openaiCachePayload(payload);
+  return payload;
+}

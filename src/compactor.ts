@@ -3,12 +3,11 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { COMPACT } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
-import { cachePayload } from './cache.ts';
+import { cacheFor } from './cache.ts';
 import { IMPORT_GUIDANCE } from './import/guidance.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
-const scaleBase = 'user: Keep work and personal memory separate; use a binary summary tree and inspect original messages before acting. talk: Implemented the append-only log with durable writes and a stable view. echo: Checked caching, chronological summaries, cancellation, and profile locks. user: Main agent uses Opus; compactor uses Sonnet at medium effort. work: Worker completed the parser; tests cover invalid records and repeated imports. talk: The browser opens original messages, preserving dates and sources.';
-export const SCALE = scaleBase.padEnd(NODE, '.').slice(0, NODE);
+export const SCALE = 'user: keep work and personal memory in separate profiles; main agent on gpt-5.6-sol, compactor at medium effort; zoom before acting on a summary. talk: proposed fixing the view fold so old lines only coarsen. tool: read src/memory.ts (fit merges the most-due pair; pump enforces rule 3). echo: npm test: 47/47 pass; tsc clean. work: [a3f9] benchmark on 100k messages, load 5.6 s to 1.0 s. user: approved; asked to open the PR on the fork, never upstream; merge stays manual. talk: pushed fresh-turns, PR #1 open.';
 export function createCompressor(registry: ModelRegistry, choice: () => ModelChoice,
   onUsage: (message: AssistantMessage) => void = () => {}): Compressor {
   return async (input, signal) => {
@@ -21,7 +20,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     for (let attempt = 0; attempt < 5; attempt++) {
       const reply = await registry.streamSimple(model, { systemPrompt: COMPACT, messages }, {
         reasoning: selected.thinking === 'off' ? undefined : selected.thinking, signal, cacheRetention: 'short',
-        onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload) : payload,
+        sessionId: 'optchat-compactor', transport: 'sse', onPayload: payload => cacheFor(model.api, payload),
       }).result();
       onUsage(reply);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);

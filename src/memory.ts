@@ -12,10 +12,12 @@ export interface Part { l: number; i: number }
 export interface Summary extends Part { text: string; size: number }
 export interface Compression { context: string; source: string; merge: boolean; historical?: boolean }
 export type Compressor = (input: Compression, signal: AbortSignal) => Promise<string>;
-const key = ({ l, i }: Part) => `${l}:${i}`;
+const key = ({ l, i }: Part) => l * 2 ** 40 + i;
+const UNBUILT = '(not summarized yet: zoom it)';
 export const start = ({ l, i }: Part) => i * 2 ** l;
 export const end = (part: Part) => start(part) + 2 ** part.l;
 export const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
+const UNBUILT_BYTES = bytes(UNBUILT);
 export const flat = (s: string) => s.replace(/[\r\n]+/g, ' ');
 export function cap(text: string, limit = CAP) {
   if (text.length <= limit) return text;
@@ -68,13 +70,17 @@ function isSummary(value: unknown): value is Summary {
 /** The log is authoritative. The tree and monotonically coarsening view follow recipe §§2–6. */
 export class Memory {
   readonly root: Entry[] = [];
-  readonly tree = new Map<string, Summary>();
+  readonly tree = new Map<number, Summary>();
   readonly view: Part[] = [];
   private readonly events = new EventEmitter();
   private readonly controller = new AbortController();
-  private readonly busy = new Map<string, Promise<void>>();
-  private readonly retryAt = new Map<string, number>();
-  private readonly reported = new Set<string>();
+  private readonly busy = new Map<number, Promise<void>>();
+  private readonly retryAt = new Map<number, number>();
+  private readonly reported = new Set<number>();
+  private viewBytes = 0;
+  private leaves = 0;
+  /** Per level, every node below this index is built. */
+  private readonly low: number[] = [];
   private retryTimer?: ReturnType<typeof setTimeout>;
   private scheduled = false;
   private stopped = false;
@@ -91,40 +97,42 @@ export class Memory {
     for (const value of records(join(directory, 'tree'), warn)) {
       if (!isSummary(value) || value.l < 0 || value.i < 0 || end(value) > this.root.length)
         throw new Error('Invalid OptChat summary record.');
+      if (value.l === 0 && !this.tree.has(key(value))) this.leaves++;
       this.tree.set(key(value), { ...value, size: bytes(value.text) });
     }
     // Fold history in order; do not retile the entire log on each turn.
-    for (let i = 0; i < this.root.length; i++) { this.view.push({ l: 0, i }); this.fit(i + 1); }
+    for (let i = 0; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
     this.schedule();
   }
   append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string) {
     if (this.stopped) throw new Error('Memory is closed.');
     const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}) };
     appendJson(join(this.directory, 'main', `${localDay()}.jsonl`), entry);
-    this.root.push(entry); this.view.push({ l: 0, i: entry.i }); this.fit(); this.schedule();
+    this.root.push(entry); this.push(entry.i); this.fit(); this.schedule();
     return entry;
   }
   node(part: Part) { return this.tree.get(key(part)); }
-  private text(part: Part) { return this.node(part)?.text ?? '(not summarized yet: zoom it)'; }
+  private text(part: Part) { return this.node(part)?.text ?? UNBUILT; }
+  private partBytes(part: Part) { return this.node(part)?.size ?? UNBUILT_BYTES; }
+  private push(i: number) { const part = { l: 0, i }; this.view.push(part); this.viewBytes += this.partBytes(part); }
   render() { return `<chat>\n${this.view.map(p => `${start(p)}+${2 ** p.l}|${flat(this.text(p))}`).join('\n')}\n</chat>`; }
   get ready() { return this.view.every(p => this.node(p)); }
-  get pending() { return this.root.filter(e => !this.tree.has(key({ l: 0, i: e.i }))).length; }
+  get pending() { return this.root.length - this.leaves; }
   get active() { return this.busy.size; }
-  get size() { return this.view.reduce((n, p) => n + bytes(this.text(p)), 0); }
+  get size() { return this.viewBytes; }
   private fit(total = this.root.length) {
-    let size = this.size;
-    while (size > this.budget) {
+    while (this.viewBytes > this.budget) {
       let best = -1; let due = -Infinity;
       for (let j = 0; j + 1 < this.view.length; j++) {
         const a = this.view[j], b = this.view[j + 1];
-        if (a.l !== b.l || a.i % 2 || b.i !== a.i + 1 || !this.node({ l: a.l + 1, i: a.i / 2 })) continue;
+        if (a.l !== b.l || a.i % 2 || b.i !== a.i + 1) continue;
         const age = (total - start(a)) / 2 ** (a.l + 2);
-        if (age > due) { best = j; due = age; }
+        if (age > due && this.node({ l: a.l + 1, i: a.i / 2 })) { best = j; due = age; }
       }
       if (best < 0) break;
       const a = this.view[best], b = this.view[best + 1];
       const parent = { l: a.l + 1, i: a.i / 2 };
-      size += bytes(this.text(parent)) - bytes(this.text(a)) - bytes(this.text(b));
+      this.viewBytes += this.partBytes(parent) - this.partBytes(a) - this.partBytes(b);
       this.view.splice(best, 2, parent);
     }
     this.events.emit('change');
@@ -140,11 +148,14 @@ export class Memory {
     const first = this.view.find(p => !this.node(p));
     const boundary = first ? start(first) : total;
     for (let l = 0; 2 ** l <= total; l++) {
-      for (let i = 0; (i + 1) * 2 ** l <= total; i++) {
+      let low = this.low[l] ?? 0;
+      while (this.node({ l, i: low })) low++;
+      this.low[l] = low;
+      for (let i = low; (i + 1) * 2 ** l <= total; i++) {
         if (this.busy.size >= this.jobs) return;
         const part = { l, i }, id = key(part);
+        if ((l === 0 ? i : end(part)) > boundary) break;
         if (this.node(part) || this.busy.has(id) || (this.retryAt.get(id) ?? 0) > Date.now()) continue;
-        if ((l === 0 ? i : end(part)) > boundary) continue;
         if (l && (!this.node({ l: l - 1, i: 2 * i }) || !this.node({ l: l - 1, i: 2 * i + 1 }))) continue;
         const promise = this.build(part).catch(error => {
           if (this.stopped) return;
@@ -173,11 +184,13 @@ export class Memory {
     const node = { ...part, text, size: bytes(text) };
     appendJson(join(this.directory, 'tree', `${localDay()}.jsonl`), node);
     this.tree.set(key(part), node); this.retryAt.delete(key(part));
+    // An unbuilt leaf is always still in the view: its parent needs it before any merge.
+    if (part.l === 0) { this.leaves++; this.viewBytes += node.size - UNBUILT_BYTES; }
     if (!this.retryAt.size) this.lastError = undefined;
     this.fit();
   }
   async settle(signal?: AbortSignal, all = false): Promise<void> {
-    const done = () => this.ready && this.size <= this.budget && (!all || (this.busy.size === 0 && this.tree.size === this.expectedNodes()));
+    const done = () => this.ready && (!all || (this.busy.size === 0 && this.tree.size === this.expectedNodes()));
     if (done()) return;
     if (this.stopped || signal?.aborted) throw new Error('Memory wait cancelled.');
     await new Promise<void>((resolve, reject) => {

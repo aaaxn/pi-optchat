@@ -10,8 +10,8 @@ import { Memory } from './memory.ts';
 import { createCompressor } from './compactor.ts';
 import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
 import { MASTER, VIEW_DOC } from './prompts.ts';
-import { cachePayload, record } from './cache.ts';
-import { boundedMessage, buildContext, logMessage, previousExchange, RUN_BOUNDARY, textContent } from './transcript.ts';
+import { cacheFor, record } from './cache.ts';
+import { boundedMessage, buildContext, logMessage, textContent } from './transcript.ts';
 import { memoryTools, result } from './tools.ts';
 import { Children } from './agents.ts';
 import { exportBrowser } from './browser.ts';
@@ -28,6 +28,7 @@ import { openConnectedWindow } from './connected-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 
 const binding = 'optchat.profile';
+const ROTATE = 2_000_000;
 interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
 
 export default function optchat(pi: ExtensionAPI) {
@@ -36,7 +37,6 @@ export default function optchat(pi: ExtensionAPI) {
   let closeWindows: (() => Promise<void>) | undefined;
   let recovery: Promise<void> | undefined;
   let run: AgentMessage[] = [];
-  let previous: AgentMessage[] = [];
   let logged = 0;
   let view: string | undefined;
   let prompt = '';
@@ -94,7 +94,7 @@ export default function optchat(pi: ExtensionAPI) {
       await checkpoint(old.dir);
     } finally {
       await old.memory.close(); await old.unlock(); active = undefined;
-      run = []; previous = []; logged = 0; view = undefined; runStarted = false; receipts.clear();
+      run = []; logged = 0; view = undefined; runStarted = false; receipts.clear();
     }
   };
   const chooseProfile = async (ctx: ExtensionContext): Promise<string | undefined> => {
@@ -194,12 +194,10 @@ export default function optchat(pi: ExtensionAPI) {
     }
     return { action: 'continue' };
   });
-  pi.on('before_agent_start', (_event, ctx) => {
+  pi.on('before_agent_start', () => {
     flush(); run = []; logged = 0; view = undefined; runStarted = true;
-    previous = previousExchange(ctx.sessionManager.getBranch());
-    pi.appendEntry(RUN_BOUNDARY, { state: 'start' });
     const a = required();
-    prompt = `${MASTER}\n\n${VIEW_DOC}\n\nFor conversational continuity, the memory view may be followed by the immediately preceding completed exchange (its user requests and final answer, in full text), then the new input. Use that exact wording to understand follow-ups; older exchanges and previous tool output remain accessible through memory and zoom.\n\n${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}\n\nWorking directory: ${ctx.cwd}`;
+    prompt = `${MASTER}\n\n${VIEW_DOC}\n\n${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
   });
   pi.on('message_end', (event, ctx) => {
     if (!active || !runStarted) return;
@@ -232,7 +230,7 @@ export default function optchat(pi: ExtensionAPI) {
         view = a.memory.render(); // Capture old history before logging the new input.
         flush(); ctx.ui.setWorkingMessage();
       }
-      return { messages: buildContext(event.messages, run, view, prompt, previous) };
+      return { messages: buildContext(event.messages, run, view, prompt) };
     } catch (error) {
       // Pi catches extension errors. Explicitly abort so it cannot fall back to old context.
       ctx.abort();
@@ -241,8 +239,15 @@ export default function optchat(pi: ExtensionAPI) {
       return { messages: [{ role: 'system', content: 'OptChat context unavailable. Stop.', timestamp: 0 }] };
     }
   });
-  pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
+  pi.on('before_provider_request', (event, ctx) => cacheFor(ctx.model?.api, event.payload));
   pi.on('cache_warming_decision', () => ({ action: 'stop' }));
+  // Pi clones its whole in-process transcript on every model call, although the context sent is only the view
+  // and the current run. Drop that transcript once it grows large; the log on disk keeps every entry.
+  pi.on('agent_before_settle', event => {
+    if (!active || JSON.stringify(event.context.contextMessages).length <= ROTATE) return;
+    return { entries: [...event.entries, { type: 'compaction', firstKeptEntryId: null,
+      summary: 'OptChat keeps history in its memory view. Earlier Pi transcript was dropped from the in-process context; the session file still holds it.' }] };
+  });
   pi.on('session_before_compact', (_event, ctx) => {
     ctx.ui.notify('OptChat manages history between turns. Pi compaction is disabled; an exceptionally long single run may require stopping and continuing in a new turn.', 'info');
     return { cancel: true };
@@ -255,7 +260,6 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('agent_settled', async (_event, ctx) => {
     collectUsage(ctx);
     try { flush(); } catch (error) { fault = errorText(error); ctx.ui.notify(fault, 'error'); }
-    if (runStarted) pi.appendEntry(RUN_BOUNDARY, { state: 'end' });
     runStarted = false; status(ctx);
     if (active) {
       const dir = active.dir;
