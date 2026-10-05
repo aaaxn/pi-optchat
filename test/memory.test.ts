@@ -128,3 +128,28 @@ test('crash recovery saves unconsumed inputs once, including append-before-ack c
     assert.equal(memory.root.length, 2);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('incremental view size and pending count match the rendered view across failures and restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-size-'));
+  let failures = 3;
+  const compress = async (input: Compression) => {
+    if (failures-- > 0) throw new Error('transient');
+    return input.source.slice(0, 120 + input.source.length % 200);
+  };
+  const measured = (memory: Memory) => memory.render().split('\n').slice(1, -1)
+    .reduce((n, line) => n + bytes(line.slice(line.indexOf('|') + 1)), 0);
+  let memory = new Memory(dir, compress, () => {}, 4000, 8, 10);
+  try {
+    for (let i = 0; i < 120; i++) {
+      memory.append(i % 3 ? 'echo' : 'user', `${i} ${'detail '.repeat(i % 7 ? 90 : 2)}`);
+      assert.equal(memory.size, measured(memory), `size after append ${i}`);
+    }
+    await memory.settle(AbortSignal.timeout(5000), true);
+    assert.equal(memory.pending, 0);
+    assert.equal(memory.size, measured(memory));
+    await memory.close();
+    memory = new Memory(dir, compress, () => {}, 4000, 8, 10);
+    assert.equal(memory.pending, 0);
+    assert.equal(memory.size, measured(memory));
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
