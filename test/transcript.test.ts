@@ -144,6 +144,14 @@ test('real Pi lifecycle starts every turn from the view alone, across tool calls
     const log = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n'));
     assert.equal(log.length, 23, 'only actual requests, replies, one failure, and tool activity should be logged');
     assert.deepEqual(errors, []);
+    await active.prompt('Large paste: ' + 'z'.repeat(2_100_000));
+    assert.equal(fresh.getBranch().filter(e => e.type === 'compaction').length, 1, 'a large in-process transcript is dropped');
+    assert.ok(active.messages.length <= 2);
+    await active.prompt('After rotation.');
+    assert.deepEqual(captured.at(-1)!.messages.map(m => m.role), ['user']);
+    assert.match(textContent(captured.at(-1)!.messages[0].content), /After rotation\.$/);
+    assert.equal(fresh.getBranch().filter(e => e.type === 'compaction').length, 1, 'a small transcript is kept');
+    assert.deepEqual(errors, []);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;

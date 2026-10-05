@@ -28,6 +28,7 @@ import { openConnectedWindow } from './connected-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 
 const binding = 'optchat.profile';
+const ROTATE = 2_000_000;
 interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
 
 export default function optchat(pi: ExtensionAPI) {
@@ -240,6 +241,13 @@ export default function optchat(pi: ExtensionAPI) {
   });
   pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
   pi.on('cache_warming_decision', () => ({ action: 'stop' }));
+  // Pi clones its whole in-process transcript on every model call, although the context sent is only the view
+  // and the current run. Drop that transcript once it grows large; the log on disk keeps every entry.
+  pi.on('agent_before_settle', event => {
+    if (!active || JSON.stringify(event.context.contextMessages).length <= ROTATE) return;
+    return { entries: [{ type: 'compaction', firstKeptEntryId: null,
+      summary: 'OptChat keeps history in its memory view. Earlier Pi transcript was dropped from the in-process context; the session file still holds it.' }] };
+  });
   pi.on('session_before_compact', (_event, ctx) => {
     ctx.ui.notify('OptChat manages history between turns. Pi compaction is disabled; an exceptionally long single run may require stopping and continuing in a new turn.', 'info');
     return { cancel: true };

@@ -113,7 +113,7 @@ Implementation choices:
 1. Native Pi UI and small built-in SDK `spawn`/`tell` support, without a separate subagent package or Pi fork.
 2. Explicit profile `AGENTS.md` controls automatic instruction injection. Repository/global Pi `AGENTS.md` files are not automatically included in the OptChat prompt; tell the agent to read project instructions when needed. Skills and template expansion remain Pi features.
 3. Historical memory is text-only. Image blocks remain available within their active Pi run/session, but OptChat stores placeholders rather than a searchable image archive.
-4. Pi's automatic compaction and cache warming are disabled in favor of the recipe. An exceptionally long single run can still hit the model's context limit; stop it and continue in a new turn.
+4. Pi's automatic compaction and cache warming are disabled in favor of the recipe. An exceptionally long single run can still hit the model's context limit; stop it and continue in a new turn. When Pi's in-process transcript passes about 2 MB, a settled run appends a retain-none compaction entry so Pi stops cloning it on every model call; the session file keeps every entry, and the TUI redraws the chat from that point.
 5. Import adds historical source/date/branch guidance alongside the recipe prompts. Computer use and hosting on an always-on machine remain deferred.
 6. The agent inspector and usage ledger are local views, separate from the memory tree. Two intentional delegation changes: direct children report individually instead of waiting for their whole spawn batch, and children can delegate two extra levels with automatic parent continuation, bounded to 8 active agents. The original recipe prompt constants remain unchanged; child-specific delegation guidance is appended.
 
