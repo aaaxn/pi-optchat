@@ -139,6 +139,10 @@ test('crash recovery saves unconsumed inputs once, including append-before-ack c
     let inbox = new Inbox(dir);
     inbox.record('queued while the agent was working');
     assert.equal(inbox.claim('unrelated extension message'), undefined);
+    const skill = inbox.record('/skill:demox  go');
+    assert.equal(inbox.claimSkill('demo', 'go'), undefined, 'a skill name must match whole');
+    assert.equal(inbox.claimSkill('demox', 'go'), skill);
+    inbox.acknowledge(skill);
     const delivered = inbox.record('delivered, but crashed before the journal acknowledgment');
     memory.append('user', 'delivered, but crashed before the journal acknowledgment', new Date().toISOString(), delivered);
     inbox = new Inbox(dir);

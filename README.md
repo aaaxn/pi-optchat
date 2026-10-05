@@ -103,7 +103,7 @@ Implementation choices:
 5. Import adds historical source/date/branch guidance alongside the recipe prompts. Computer use and hosting on an always-on machine remain deferred.
 6. The agent inspector and usage ledger are local views, separate from the memory tree. Delegation follows the recipe: one level of subagents, one report message per spawn, and the recipe's child prompt unchanged. The only addition is a limit of 8 active agents.
 
-Known edge case: Pi can transform a skill/template invocation (or image input) after the durable input journal records it. The expanded message is logged correctly, but the original form may also be recovered later as an unanswered input. Ordinary text chat is unaffected; this conservatively preserves input rather than risking the loss of an unrelated queued message.
+Known edge case: Pi can transform a prompt-template invocation (or image input) after the durable input journal records it. The expanded message is logged correctly, but the original form may also be recovered later as an unanswered input. Skill commands are matched back to their journaled input and do not have this problem. Ordinary text chat is unaffected; this conservatively preserves input rather than risking the loss of an unrelated queued message.
 
 ## Installation and development
 

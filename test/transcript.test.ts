@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -156,6 +156,54 @@ test('real Pi lifecycle starts every turn from the view alone, across tool calls
     assert.equal(fresh.getBranch().filter(e => e.type === 'compaction').length, 1, 'a small transcript is kept');
     assert.equal(fresh.getBranch().filter(e => e.type === 'custom' && e.customType === 'marker').length, 3, 'other extensions keep their settle entries');
     assert.deepEqual(errors, []);
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a skill command is logged once, as its expansion, and never recovered as an unanswered input', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-skill-'));
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    const config = loadConfig(profilePath('fixture'));
+    saveConfig(profilePath('fixture'), { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    mkdirSync(join(dir, 'skills', 'demo'), { recursive: true });
+    writeFileSync(join(dir, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: Demo skill.\n---\n\nFollow the demo steps.\n');
+    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
+      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+    runtime.registerProvider('fixture', {
+      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+      streamSimple(model) {
+        const reply = answer('Done.'); reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
+        const stream = createAssistantMessageEventStream();
+        void (async () => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); })();
+        return stream;
+      },
+    });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager, noExtensions: true, noContextFiles: true,
+      noSkills: true, additionalSkillPaths: [join(dir, 'skills')], noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.create(dir, join(dir, 'sessions'));
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
+      resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date'] })).session;
+    await session.bindExtensions({});
+    await session.prompt('/skill:demo   Do the task. ');
+    await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+    session.dispose(); session = undefined;
+    const main = join(dir, 'profiles', 'fixture', 'main');
+    const log = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n')).map(line => JSON.parse(line));
+    assert.deepEqual(log.map(entry => entry.kind), ['user', 'talk']);
+    assert.match(log[0].text, /^<skill name="demo"[\s\S]*Follow the demo steps\.[\s\S]*Do the task\.$/);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'profiles', 'fixture', 'pending-inputs.json'), 'utf8')), []);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
