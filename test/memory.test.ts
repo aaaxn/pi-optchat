@@ -101,9 +101,12 @@ test('OpenAI requests keep reasoning across turns and send the view unchanged', 
   assert.equal(cacheFor('google-generative-ai', payload), payload);
 });
 
-test('the compactor scale line is exactly one node long', () => {
+test('the compactor scale line is one node long, realistic, and has nothing to copy', () => {
   assert.equal(bytes(SCALE), 512);
-  assert.doesNotMatch(SCALE, /\.{3,}$/);
+  assert.doesNotMatch(SCALE, /\.{3,}$/, 'no padding');
+  assert.doesNotMatch(SCALE, /[^\x20-\x7e]/, 'ASCII only, so bytes equal characters');
+  assert.doesNotMatch(SCALE, /\d/, 'no ids or numbers for the compactor to copy');
+  for (const kind of ['user', 'talk', 'tool', 'echo', 'work']) assert.match(SCALE, new RegExp(`\\b${kind}: `), `tagged ${kind}`);
 });
 
 test('next turn excludes old conversation; current tool loop and reasoning remain verbatim', async () => {

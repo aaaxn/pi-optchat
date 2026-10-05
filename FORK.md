@@ -30,4 +30,4 @@ Fixes that suit both designs go upstream. Upstream already took these from the f
 | | This fork | Upstream |
 |---|---|---|
 | OpenAI Responses APIs | `reasoning.context: all_turns`, so a message that arrives mid-run keeps earlier reasoning. The compactor shares one cache key over SSE | No OpenAI-specific settings |
-| Compactor scale line | A dense 512-byte example (recipe §4.2) | A shorter example padded with dots |
+| Compactor scale line | A realistic 512-byte example with every kind and no ids or numbers (recipe §4.2) | A shorter example padded with dots to 512 bytes |

@@ -7,7 +7,8 @@ import { cacheFor } from './cache.ts';
 import { IMPORT_GUIDANCE } from './import/guidance.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
-export const SCALE = 'user: keep work and personal memory in separate profiles; main agent on gpt-5.6-sol, compactor at medium effort; zoom before acting on a summary. talk: proposed fixing the view fold so old lines only coarsen. tool: read src/memory.ts (fit merges the most-due pair; pump enforces rule 3). echo: npm test: 47/47 pass; tsc clean. work: [a3f9] benchmark on 100k messages, load 5.6 s to 1.0 s. user: approved; asked to open the PR on the fork, never upstream; merge stays manual. talk: pushed fresh-turns, PR #1 open.';
+/** Recipe §4.2: a realistic, dense line of exactly NODE bytes, tagged with kinds. No ids or numbers: the compactor copies them. */
+export const SCALE = 'user: Keep work and personal memory separate; use a binary summary tree and inspect original messages before acting. talk: Implemented the append-only log with durable writes and a stable view. tool: ran the test suite; echo: all pass except cancellation, which hangs on abort. user: Main agent uses a large model, compactor a small one at medium effort. work: Worker finished the parser; tests cover invalid records and repeated imports. talk: The browser opens original messages, keeping the dates and sources.';
 export function createCompressor(registry: ModelRegistry, choice: () => ModelChoice,
   onUsage: (message: AssistantMessage) => void = () => {}): Compressor {
   return async (input, signal) => {
