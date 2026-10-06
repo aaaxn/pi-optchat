@@ -71,9 +71,11 @@ Ask in plain words, for example: "Spawn an agent to investigate this repository 
 
 - `spawn` starts one subagent per task, each in its task's `cwd` (default: the main chat's directory). Pi loads the `AGENTS.md` files of that directory, so one main chat can delegate to any project without being opened there.
 - Children get the profile's memory view (frozen at launch), its instructions, read-only `zoom`/`date`, and normal coding tools plus your installed extensions, but not `spawn` or `tell`: only the main agent delegates.
+- Children also get the Pi built-in extensions the main session loaded: MCP, codemode and tool search. Your MCP servers (`~/.pi/agent/mcp.json`, the project's `.pi/mcp.json`) work in subagents, with the sign-ins you made in Pi. If MCP is off in the main session (`--no-mcp`, `-builtin:mcp` in settings, or an extension that replaces `/mcp`), it is off in subagents too. Each subagent opens its own server connections (stdio servers start once per subagent) and closes them when it ends.
 - When all of one spawn's subagents finish, their reports reach the main agent together as one message, so put independent work in separate spawns. The main agent never polls.
 - In the main chat, subagent messages and reports appear in a dark grey box labelled `↳ subagent <id> · still running` or `· report`, so they don't look like something you typed. The model still receives them as ordinary user messages. (One exception: reports recovered at startup, before your first message in the session, still show as plain user messages.)
 - The main agent can send a running child guidance with `tell`, and the child can message the main agent mid-run with `tell_parent` (a question, an early finding), marked "still running".
+- `tell` to a finished child resumes it: the same agent (ID, model, directory) reopens its saved transcript, gets the message as a new prompt, and sends a new report on its own. This also works for children from earlier Pi sessions. The resumed child takes one of the 8 slots, and a child whose transcript is missing must be spawned fresh.
 - At most 8 agents can be active per profile. Going over the limit returns an error; there is no queue.
 - Agents run inside the Pi process. Closing Pi stops them; there is no detached mode.
 
