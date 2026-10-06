@@ -1,7 +1,7 @@
 import type { ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import type { Memory } from '../memory.ts';
 import { bytes } from '../memory.ts';
-import { adapters, sources, readConversation, type Conversation, type ImportedEntry } from './sources.ts';
+import { adapters, readConversation, type Conversation, type ImportedEntry } from './sources.ts';
 import { deduplicate, type ImportMode, type ImportJob, type ImportProgress } from './job.ts';
 import { selectMany } from './multi-select.ts';
 import { homedir } from 'node:os';
@@ -10,10 +10,11 @@ type ImportUI = { ui: Pick<ExtensionUIContext, 'select' | 'input' | 'confirm' | 
 const clean = (s: string) => s.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
 const size = (n: number) => `${(n / 1_000_000).toFixed(1)} MB`;
 export async function chooseImport(ctx: ImportUI, profile: string, memory: Memory, model: string, signal: AbortSignal): Promise<{ entries: ImportedEntry[]; mode: ImportMode } | undefined> {
-  const sourceLabel = await ctx.ui.select(`Import into ${profile} · source`, sources.map(s => adapters[s].label), { signal });
-  const source = sources.find(s => adapters[s].label === sourceLabel);
-  if (!source) return;
-  const adapter = adapters[source], { plural, singular, item } = adapter.words, unit = plural.toLowerCase();
+  const all = Object.values(adapters);
+  const sourceLabel = await ctx.ui.select(`Import into ${profile} · source`, all.map(a => a.label), { signal });
+  const adapter = all.find(a => a.label === sourceLabel);
+  if (!adapter) return;
+  const { plural, singular, item } = adapter.words, unit = plural.toLowerCase();
   ctx.ui.setWidget('optchat-import', ['Scanning local conversation metadata…']);
   let scan;
   try {

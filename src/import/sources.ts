@@ -9,15 +9,15 @@ import { createHash } from 'node:crypto';
 import { record } from '../cache.ts';
 import { bytes, type Entry, type Kind, type Origin } from '../memory.ts';
 
-export type Source = Origin['source'];
+type Source = Origin['source'];
 export type ImportedEntry = Omit<Entry, 'i' | 'size'>;
 export interface Conversation {
   source: Source; id: string; file: string; title: string; project: string; date: string; size: number;
   exported?: Record<string, unknown>;
 }
-export interface Scan { conversations: Conversation[]; warnings: string[] }
-export interface Read { entries: ImportedEntry[]; warnings: string[] }
-export interface Adapter {
+interface Scan { conversations: Conversation[]; warnings: string[] }
+interface Read { entries: ImportedEntry[]; warnings: string[] }
+interface Adapter {
   label: string;
   /** What the memory browser calls this source in "imported from ...". */
   browserLabel: string;
@@ -34,6 +34,7 @@ const exec = promisify(execFile);
 const string = (v: unknown) => typeof v === 'string' ? v : undefined;
 const codexSubagent = ({ source }: Record<string, unknown>) => source === 'subagent' || record(source) && 'subagent' in source;
 const missingSource = (error: unknown) => record(error) && (error.code === 'ENOENT' || error.code === 'ENOTDIR');
+const orEmpty = (error: unknown): never[] => { if (missingSource(error)) return []; throw error; };
 const missingWarning = (file: string) => `${file}: source file is no longer available; conversation skipped. Rescan to retry if it returns.`;
 const zoneless = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)$/;
 /** A time without a zone is UTC, not the machine's zone. A number above 1e11 is milliseconds (1e11 seconds is the year 5138). */
@@ -44,7 +45,7 @@ export function timestamp(value: unknown, fallback: string): string {
 }
 /** Header time: minutes are enough to place a message, and the rest of an ISO stamp costs summary bytes. */
 const minute = (date: string) => `${date.slice(0, 16).replace('T', ' ')}Z`;
-const titleOf = (title: string | undefined, id: string) => (title ?? '').replace(/\s+/g, ' ').trim().slice(0, 110) || id;
+const titleOf = (title: string | undefined, id: string) => (title ?? '').replace(/\s+/g, ' ').trim().slice(0, 110).trim() || id;
 const byRecent = (conversations: Conversation[]) => conversations.sort((a, b) => b.date.localeCompare(a.date));
 /**
  * Claude Code logs slash commands, `!` shell commands, and their local output as user messages. Returns undefined
@@ -194,7 +195,7 @@ const claude: Adapter = {
         meta.project = string(v.cwd) ?? meta.project;
         if (v.type === 'custom-title' || v.type === 'ai-title') meta.title = string(v.customTitle ?? v.aiTitle) ?? meta.title;
         const typed = record(v.message) && v.message.role === 'user' && !meta.title ? claudeScaffold(v.message.content) : '';
-        if (typed.trim()) { meta.title = typed.replace(/\s+/g, ' ').slice(0, 110); meta.date = timestamp(v.timestamp, meta.date); }
+        if (typed.trim()) { meta.title = titleOf(typed, ''); meta.date = timestamp(v.timestamp, meta.date); }
       }
       return meta;
     },
@@ -248,7 +249,7 @@ const codex: Adapter = {
           meta.id = string(v.payload.id) ?? meta.id; meta.project = string(v.payload.cwd) ?? meta.project; meta.date = timestamp(v.payload.timestamp ?? v.timestamp, meta.date);
         }
         const typed = v.type === 'response_item' && record(v.payload) && v.payload.role === 'user' && !meta.title ? codexScaffold(v.payload.content) : '';
-        if (typed.trim()) { meta.title = typed.replace(/\s+/g, ' ').slice(0, 110); meta.date = timestamp(v.timestamp, meta.date); }
+        if (typed.trim()) { meta.title = titleOf(typed, ''); meta.date = timestamp(v.timestamp, meta.date); }
       }
       return meta;
     },
@@ -312,8 +313,7 @@ const chatgpt: Adapter = {
     return { conversations: byRecent(conversations), warnings };
   },
   async entries(c, signal) {
-    const entries: ImportedEntry[] = [];
-    const add = (id: string, kind: Kind, value: string, date: string, identity = value) => { const entry = imported(c, id, kind, value, date, identity); if (entry) entries.push(entry); };
+    const { entries, add } = turns(c);
     const mapping = c.exported?.mapping;
     if (!record(mapping)) throw new Error('ChatGPT conversation has no message mapping.');
     // Include every branch once. Parent-first order handles missing child timestamps.
@@ -388,11 +388,11 @@ const claudeMemory: Adapter = {
   async scan(location, signal) {
     const root = location ?? join(homedir(), '.claude/projects');
     const conversations: Conversation[] = [], warnings: string[] = [];
-    const dirs = await readdir(root, { withFileTypes: true }).catch(error => { if (missingSource(error)) return []; throw error; });
+    const dirs = await readdir(root, { withFileTypes: true }).catch(orEmpty);
     for (const dir of dirs.filter(d => d.isDirectory()).map(d => d.name).sort()) {
       signal?.throwIfAborted();
       const folder = join(root, dir, 'memory');
-      const files = (await readdir(folder, { withFileTypes: true }).catch(error => { if (missingSource(error)) return []; throw error; }))
+      const files = (await readdir(folder, { withFileTypes: true }).catch(orEmpty))
         .filter(f => f.isFile() && f.name.endsWith('.md') && f.name !== 'MEMORY.md').map(f => f.name).sort();
       if (!files.length) continue;
       const project = await claudeProject(join(root, dir), dir, signal);
@@ -472,7 +472,6 @@ function unquote(value: string): string {
 }
 
 export const adapters = { claude, 'claude-memory': claudeMemory, codex, chatgpt } satisfies Record<Source, Adapter>;
-export const sources = Object.keys(adapters).filter((key): key is Source => key in adapters);
 export async function readConversation(c: Conversation, signal?: AbortSignal): Promise<Read> {
   signal?.throwIfAborted();
   const { entries, warnings } = await adapters[c.source].entries(c, signal);
