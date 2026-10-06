@@ -36,9 +36,9 @@ const codexSubagent = ({ source }: Record<string, unknown>) => source === 'subag
 const missingSource = (error: unknown) => record(error) && (error.code === 'ENOENT' || error.code === 'ENOTDIR');
 const missingWarning = (file: string) => `${file}: source file is no longer available; conversation skipped. Rescan to retry if it returns.`;
 const zoneless = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)$/;
-/** A time without a zone is UTC, not the machine's zone. */
+/** A time without a zone is UTC, not the machine's zone. A number above 1e11 is milliseconds (1e11 seconds is the year 5138). */
 export function timestamp(value: unknown, fallback: string): string {
-  const time = typeof value === 'number' ? value * 1000 : typeof value === 'string' ? Date.parse(value.trim().replace(zoneless, '$1T$2Z')) : NaN;
+  const time = typeof value === 'number' ? (value > 1e11 ? value : value * 1000) : typeof value === 'string' ? Date.parse(value.trim().replace(zoneless, '$1T$2Z')) : NaN;
   const date = new Date(time);
   return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
 }

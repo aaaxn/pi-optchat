@@ -438,8 +438,13 @@ test('a time without a zone is UTC whatever the machine zone', () => {
   } finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }
 });
 
+test('a number is seconds, or milliseconds when it is too large to be seconds', () => {
+  assert.equal(timestamp(1767261600.5, 'x'), '2026-01-01T10:00:00.500Z');
+  assert.equal(timestamp(1767261600123, 'x'), '2026-01-01T10:00:00.123Z');
+});
+
 test('an out-of-range or invalid time falls back without throwing', () => {
-  for (const bad of [1e13, -1e13, NaN, Infinity, 'not a time', undefined, null]) assert.equal(timestamp(bad, 'fallback'), 'fallback');
+  for (const bad of [1e16, -1e16, NaN, Infinity, 'not a time', undefined, null]) assert.equal(timestamp(bad, 'fallback'), 'fallback');
 });
 
 test('a ChatGPT conversation with an empty or multi-line title gets a one-line header that falls back to its id', async () => {
