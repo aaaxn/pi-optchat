@@ -486,3 +486,23 @@ test('view size counts the flattened text that render emits, for new and reloade
     assert.equal(memory.size, measured(memory), 'loaded from the tree');
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('a log loaded with many unsummarized messages still gives the compactor a full view before each message', async () => {
+  // An import stages its whole log at once. Its placeholders alone exceed this budget, and once counted they made fit merge every built pair.
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-bulk-'));
+  mkdirSync(join(dir, 'main'));
+  const date = new Date().toISOString(), budget = 2000;
+  writeFileSync(join(dir, 'main', `${localDay()}.jsonl`), Array.from({ length: 100 }, (_, i) =>
+    JSON.stringify({ i, kind: 'echo', text: `${i} ${'output line '.repeat(60)}`, date })).join('\n') + '\n');
+  const leaves: number[] = [];
+  const memory = new Memory(dir, async input => {
+    if (!input.merge) leaves.push(bytes(input.context));
+    return input.source.slice(0, 190);
+  }, () => {}, budget);
+  try {
+    assert.ok(memory.view.length * bytes('(not summarized yet: zoom it)') > budget, 'the placeholders alone exceed the budget');
+    await memory.settle(AbortSignal.timeout(10000), true);
+    const thin = leaves.slice(20).filter(n => n < budget / 2);
+    assert.deepEqual(thin, [], `contexts under half the budget for messages 20 to 99`);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
