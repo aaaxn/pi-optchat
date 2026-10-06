@@ -63,6 +63,17 @@ function claudeCommand(content: string): string | undefined {
   const name = /<command-name>([^<]*)<\/command-name>/.exec(s)?.[1].trim(), args = /<command-args>([\s\S]*?)<\/command-args>/.exec(s)?.[1].trim();
   return name && args ? `${name} ${args}` : '';
 }
+const tagged = (tag: string, open = `<${tag}>`) => new RegExp(`^${open}[\\s\\S]*</${tag}>$`, 'i');
+/** The messages Codex itself recognizes as context it injected, not typed by the user (codex-rs core/src/context/contextual_user_message.rs). */
+const codexContext = [
+  tagged('INSTRUCTIONS', '# AGENTS\\.md instructions'), tagged('environment_context'), tagged('user_shell_command'), tagged('turn_aborted'),
+  tagged('subagent_notification'), tagged('skill'), tagged('agent_message_board_notification'), tagged('recommended_plugins'), tagged('goal_context'),
+  tagged('hook_prompt', '<hook_prompt hook_run_id="[^"]+">'), /^<codex_internal_context source="[a-z][a-z0-9_]*">[\s\S]*<\/codex_internal_context>$/,
+  /^<external_([^>]+)>[\s\S]*<\/external_\1>$/i,
+  /^Warning: apply_patch was requested via [\s\S]*Use the apply_patch tool instead of exec_command\.$/,
+  /^Warning: Your account was flagged for potentially high-risk cyber activity/,
+  /^Warning: The maximum number of unified exec processes you can keep open is/,
+];
 function text(value: unknown): string {
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) return value.map(text).filter(Boolean).join('\n');
@@ -228,7 +239,7 @@ const claude: Adapter = {
   }),
 };
 
-const codexScaffold = text;
+const codexScaffold = (content: unknown) => (Array.isArray(content) ? content : [content]).map(text).filter(piece => piece && !codexContext.some(re => re.test(piece.trim()))).join('\n');
 const codex: Adapter = {
   label: 'Codex',
   words: claude.words,
