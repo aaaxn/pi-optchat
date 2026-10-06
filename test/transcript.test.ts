@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import { fakeProvider, fakeRuntime } from './fakes.ts';
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type UserMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
@@ -11,7 +12,6 @@ import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profi
 import { buildContext, textContent, typedText } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
-import { fakeProvider, fakeRuntime } from './fakes.ts';
 
 const user = (content: UserMessage['content']): UserMessage => ({ role: 'user', content, timestamp: 1 });
 const answer = (text: string, stopReason: AssistantMessage['stopReason'] = 'stop'): AssistantMessage => ({

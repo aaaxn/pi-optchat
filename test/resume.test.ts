@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, type AgentSession } from '@earendil-works/pi-coding-agent';
 import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
-import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 
 async function until(condition: () => boolean) {
   const deadline = Date.now() + 10000;

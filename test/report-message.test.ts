@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fakeProvider, fakeRuntime } from './fakes.ts';
 import { createAssistantMessageEventStream, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
 import { createAgentSession, CustomMessageComponent, DefaultResourceLoader, initTheme, SessionManager, SettingsManager,
   UserMessageComponent, type ExtensionAPI, type MessageRenderer } from '@earendil-works/pi-coding-agent';
@@ -12,7 +13,6 @@ import { registerReportRenderer, reportParts } from '../src/report-message.ts';
 import { REPORT_TYPE, textContent } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
-import { fakeProvider, fakeRuntime } from './fakes.ts';
 
 initTheme('dark', false);
 const plain = (lines: string[]) => lines.join('\n').replace(/\x1b\[[0-9;:]*[A-Za-z]|\x1b[\]_][^\x07\x1b]*(\x07|\x1b\\)/g, '');

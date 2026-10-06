@@ -32,8 +32,13 @@ const rules: Rule[] = [
   { name: 'run-state-owner', exempt: /^src\/runs\.ts$/, message: 'Run state changes only through transition() in src/runs.ts.',
     hit: node => ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
       && ts.isPropertyAccessExpression(node.left) && node.left.name.text === 'state' },
-  { name: 'test-sandbox', exempt: /^(?!test\/[^/]+\.test\.ts$)|^test\/support\.test\.ts$/, message: "A test file imports './support.ts' (or './fakes.ts') so a single-file run is sandboxed from the real home. Add `import './support.ts';` as its first line.",
-    hit: node => ts.isSourceFile(node) && !node.statements.some(statement => ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier) && ['./support.ts', './fakes.ts'].includes(statement.moduleSpecifier.text)) },
+  { name: 'test-sandbox', exempt: /^(?!test\/[^/]+\.test\.ts$)|^test\/support\.test\.ts$/, message: "A test file imports './support.ts' (or './fakes.ts') before any import from ../src/ or @earendil-works/, so a single-file run is sandboxed from the real home. Put `import './support.ts';` before them.",
+    hit: node => {
+      if (!ts.isSourceFile(node)) return false;
+      const modules = node.statements.filter(ts.isImportDeclaration).filter(statement => !statement.importClause?.isTypeOnly).map(statement => ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : '');
+      const sandbox = modules.findIndex(name => ['./support.ts', './fakes.ts'].includes(name)), loads = modules.findIndex(name => name.startsWith('../src/') || name.startsWith('@earendil-works/'));
+      return sandbox < 0 || loads >= 0 && loads < sandbox;
+    } },
   { name: 'source-branch', exempt: /^src\/import\/sources\.ts$/, message: 'Per-source behavior lives in the adapter table in src/import/sources.ts.',
     hit: node => {
       const isSource = (n: ts.Node) => ts.isPropertyAccessExpression(n) && n.name.text === 'source';

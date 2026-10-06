@@ -32,20 +32,22 @@ test('importing the test helpers alone is enough, so a single test file is isola
   for (const dir of dirs) assert.ok(under(tmpdir(), dir) && !existsSync(dir), `${dir} was removed at exit`);
 });
 
-test('lint rejects a test file that does not import the sandbox, so a single-file run cannot reach the real home', () => {
+test('lint rejects a test file that does not import the sandbox before its first src or Pi import, so a single-file run cannot reach the real home', () => {
   const root = mkdtempSync(join(tmpdir(), 'optchat-lint-sandbox-'));
   for (const dir of ['src', 'test']) mkdirSync(join(root, dir));
   const bare = "import { test } from 'node:test';\ntest('x', () => {});\n";
   writeFileSync(join(root, 'test/bare.test.ts'), bare);
   writeFileSync(join(root, 'test/sandboxed.test.ts'), "import './support.ts';\n" + bare);
-  writeFileSync(join(root, 'test/faked.test.ts'), bare + "import { fakeRuntime } from './fakes.ts';\n");
+  writeFileSync(join(root, 'test/faked.test.ts'), bare + "import { fakeRuntime } from './fakes.ts';\nimport { x } from '../src/x.ts';\n");
+  writeFileSync(join(root, 'test/late.test.ts'), "import { x } from '../src/x.ts';\nimport './support.ts';\n" + bare);
+  writeFileSync(join(root, 'test/late-pi.test.ts'), "import { y } from '@earendil-works/pi-ai';\nimport { fakeRuntime } from './fakes.ts';\n" + bare);
   writeFileSync(join(root, 'test/support.test.ts'), bare);
   writeFileSync(join(root, 'test/helper.ts'), bare);
   writeFileSync(join(root, 'src/bare.ts'), bare);
   try {
     const run = spawnSync(process.execPath, ['--import', 'tsx', resolve(import.meta.dirname, '../scripts/lint.ts'), root], { cwd: resolve(import.meta.dirname, '..'), encoding: 'utf8' });
     assert.equal(run.status, 1);
-    assert.match(run.stdout, /^test\/bare\.test\.ts:1 test-sandbox A test file imports '\.\/support\.ts' \(or '\.\/fakes\.ts'\)[^\n]*Add `import '\.\/support\.ts';` as its first line\.\n/);
-    assert.deepEqual(run.stdout.split('\n').filter(line => line.startsWith('test/') || line.startsWith('src/')).map(line => line.split(' ')[0]), ['test/bare.test.ts:1']);
+    assert.match(run.stdout, /^test\/bare\.test\.ts:1 test-sandbox A test file imports '\.\/support\.ts' \(or '\.\/fakes\.ts'\) before any import from \.\.\/src\/ or @earendil-works\/[^\n]*Put `import '\.\/support\.ts';` before them\.\n/);
+    assert.deepEqual(run.stdout.split('\n').filter(line => line.startsWith('test/') || line.startsWith('src/')).map(line => line.split(' ')[0]).sort(), ['test/bare.test.ts:1', 'test/late-pi.test.ts:1', 'test/late.test.ts:1']);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
