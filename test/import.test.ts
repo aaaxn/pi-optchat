@@ -488,6 +488,22 @@ test('a resumed Claude transcript is listed under its file name, and its copied 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a Claude record without a sessionId takes the last one seen in the file, and a leading one takes the file name', async () => {
+  const dir = temp();
+  const user = (uuid: string, content: string, session?: string) => ({ type: 'user', uuid, ...(session === undefined ? {} : { sessionId: session }), timestamp: date, message: { role: 'user', content } });
+  const reply = (uuid: string, content: string, session?: string) => ({ type: 'assistant', uuid, ...(session === undefined ? {} : { sessionId: session }), timestamp: date, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: content }] } });
+  lines(join(dir, 'nosess2-4444.jsonl'), [user('u1', 'q1', 'sess-x'), reply('a1', 'r1'), user('u2', 'q2', ''), reply('a2', 'r2')]);
+  lines(join(dir, 'whole-5555.jsonl'), [user('u1', 'q1', 'sess-x'), reply('a1', 'r1', 'sess-x'), user('u2', 'q2', 'sess-x'), reply('a2', 'r2', 'sess-x')]);
+  lines(join(dir, 'lead-6666.jsonl'), [user('u0', 'q0'), reply('a0', 'r0'), user('u1', 'q1', 'sess-y'), reply('a1', 'r1')]);
+  try {
+    const read = async (id: string) => readConversation((await adapters.claude.scan(dir)).conversations.find(c => c.id === id)!);
+    const [mixed, whole, lead] = await Promise.all(['nosess2-4444', 'whole-5555', 'lead-6666'].map(read));
+    assert.deepEqual(mixed.entries.map(e => e.origin?.conversation), Array(4).fill('sess-x'));
+    assert.deepEqual(mixed.entries.map(e => e.receipt), whole.entries.map(e => e.receipt), 'the receipts are the ones a file with every sessionId gives, so a re-import adds nothing');
+    assert.deepEqual(lead.entries.map(e => e.origin?.conversation), ['lead-6666', 'lead-6666', 'sess-y', 'sess-y']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 const codexFixture = new URL('./fixtures/codex-rollout.jsonl', import.meta.url).pathname;
 const receipt = (...identity: unknown[]) => `import:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
 

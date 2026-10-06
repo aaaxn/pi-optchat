@@ -146,13 +146,15 @@ async function scanTranscripts(source: 'claude' | 'codex', t: Transcripts, signa
 /** Replies wait in `pending` until something marks them final, so a tool loop's progress text never reaches memory. */
 function turns(c: Conversation) {
   const entries: ImportedEntry[] = [];
-  let pending: ImportedEntry[] = [];
+  let pending: ImportedEntry[] = [], conversation: string | undefined;
   const finish = () => { entries.push(...pending); pending = []; };
   return {
     entries, finish,
     reset: () => { pending = []; },
-    add(id: string, kind: Kind, content: string, date: string, identity = content, conversation?: string) { const entry = imported(c, id, kind, content, date, identity, conversation); if (entry) entries.push(entry); },
-    assistant(parts: { id: string; content: string }[], date: string, final: boolean, conversation?: string) {
+    /** A record that names no session belongs to the last one named, as if the whole file had named it. An empty name is no name. */
+    session(name: unknown) { conversation = string(name) || conversation; },
+    add(id: string, kind: Kind, content: string, date: string, identity = content) { const entry = imported(c, id, kind, content, date, identity, conversation); if (entry) entries.push(entry); },
+    assistant(parts: { id: string; content: string }[], date: string, final: boolean) {
       pending = parts.flatMap(part => { const entry = imported(c, part.id, 'talk', part.content, date, part.content, conversation); return entry ? [entry] : []; });
       if (final) finish();
     },
@@ -201,12 +203,13 @@ const claude: Adapter = {
     },
   }, signal),
   entries: (c, signal) => readTranscript(c, signal, (v, line, date, t, warnings) => {
+    t.session(v.sessionId);
     // Context replay and compaction scaffolding are not new user requests.
     if (v.type === 'system' && v.subtype === 'compact_boundary') { t.reset(); return; }
     if (v.isMeta === true || v.isCompactSummary === true) return;
     if (v.isSidechain === true) return 'drop';
     if (!['user', 'assistant'].includes(String(v.type)) || !record(v.message)) return;
-    const m = v.message, id = string(v.uuid) ?? `line:${line}`, session = string(v.sessionId);
+    const m = v.message, id = string(v.uuid) ?? `line:${line}`;
     if (m.role === 'user' && typeof m.content === 'string' && /^\[Request interrupted by user(?: for tool use)?\]$/.test(m.content)) { t.reset(); return; }
     const blocks = Array.isArray(m.content) ? m.content : [];
     const toolActivity = blocks.some(b => record(b) && (['tool_use', 'server_tool_use', 'tool_result'].includes(String(b.type)) || String(b.type).endsWith('_tool_result')));
@@ -222,11 +225,11 @@ const claude: Adapter = {
       return [];
     });
     // Receipts keep the raw text, so a command already imported is still recognized.
-    if (m.role === 'user' && parts.length) { t.finish(); for (const part of parts) t.add(part.id, 'user', claudeScaffold(part.content), date, part.content, session); }
+    if (m.role === 'user' && parts.length) { t.finish(); for (const part of parts) t.add(part.id, 'user', claudeScaffold(part.content), date, part.content); }
     else if (m.role === 'assistant') {
       const final = m.stop_reason === 'end_turn' || m.stop_reason === 'stop_sequence';
       if (toolActivity || v.isApiErrorMessage === true || m.stop_reason && !final) t.reset();
-      else if (parts.length) t.assistant(parts, date, final, session);
+      else if (parts.length) t.assistant(parts, date, final);
       else if (!final) t.reset();
     }
   }),
