@@ -19,7 +19,6 @@ const reportReceipt = (text: string) => REPORT + createHash('sha256').update(tex
 export interface TurnProfile { memory: Memory; inbox: Inbox; dir: string }
 export type TurnContext = Pick<ExtensionContext, 'signal' | 'abort'> & { ui: Pick<ExtensionContext['ui'], 'notify' | 'setWorkingMessage'> };
 
-/** What one run owns. A new run replaces the whole object, so no field can be left over from the last one. */
 class Run {
   messages: AgentMessage[] = [];
   logged = 0;
@@ -28,7 +27,6 @@ class Run {
   constructor(public started = false) {}
 }
 
-/** The state of the conversation in flight and the rules that move it: the run's messages, what the log has, the view, the report journal. */
 export class Turn {
   working = false;
   prompt = '';
@@ -87,7 +85,6 @@ export class Turn {
   private claim(p: TurnProfile, message: UserMessage) {
     const text = textContent(message.content);
     if (this.reports.includes(text)) { this.run.receipts.set(message, reportReceipt(text)); return; }
-    // The inbox journaled the typed input: match without image placeholders or Pi's image notes.
     const typed = typedText(message.content), skill = parseSkillBlock(typed.bare);
     let receipt = p.inbox.claim(typed.text) ?? p.inbox.claim(typed.bare)
       ?? (skill ? p.inbox.claimSkill(skill.name, skill.userMessage) : undefined);

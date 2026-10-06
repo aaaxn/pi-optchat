@@ -43,8 +43,8 @@ const text = (message: AgentMessage | undefined) => JSON.stringify(message && 'c
 const sent = (messages: AgentMessage[]) => (messages.find(m => m.role === 'user') as UserMessage).content as { type: 'text'; text: string }[];
 
 test('a turn waits until every view line is a summary, then sends the view (checklist 3)', async () => {
-  const release: { run?: () => void } = {};
-  const gate = new Promise<void>(resolve => { release.run = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
   const f = await fixture(async () => { await gate; return 'SUMMARY OF THE EARLIER MESSAGE'; });
   try {
     f.memory.append('user', LONG);
@@ -55,14 +55,14 @@ test('a turn waits until every view line is a summary, then sends the view (chec
     await sleep(50);
     assert.equal(answered, false, 'no context while a view line is unsummarized');
     assert.deepEqual(f.working, ['Waiting for OptChat summaries…']);
-    release.run?.();
+    release();
     const messages = await pending;
     assert.deepEqual(f.working, ['Waiting for OptChat summaries…', undefined]);
     assert.ok(f.memory.ready);
     const sentText = text(messages[1]);
     assert.match(sentText, /SUMMARY OF THE EARLIER MESSAGE/);
     assert.doesNotMatch(sentText, /a decision worth keeping/);
-  } finally { release.run?.(); await f.done(); }
+  } finally { release(); await f.done(); }
 });
 
 test('an aborted wait for summaries clears the working message and refuses the turn (B4-F)', async () => {
