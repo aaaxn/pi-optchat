@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
@@ -19,24 +19,29 @@ export const end = (part: Part) => start(part) + 2 ** part.l;
 export const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
 const UNBUILT_BYTES = bytes(UNBUILT);
 export const flat = (s: string) => s.replace(/[\r\n]+/g, ' ');
+const lineBytes = (s: string) => bytes(flat(s));
 const VIEW_OPEN = '<chat>\n';
 export const isView = (text: string) => text.startsWith(VIEW_OPEN);
+const notice = (omitted: number) => `\n[${omitted} characters omitted; head and tail retained]\n`;
 export function cap(text: string, limit = CAP) {
   if (text.length <= limit) return text;
-  const notice = `\n[${text.length - limit} characters omitted; head and tail retained]\n`;
-  const half = Math.floor((limit - notice.length) / 2);
-  return text.slice(0, half) + notice + text.slice(-half);
+  const half = Math.floor((limit - notice(text.length).length) / 2);
+  const head = text.slice(0, /[\ud800-\udbff]/.test(text[half - 1]) ? half - 1 : half);
+  const tail = text.slice(/[\udc00-\udfff]/.test(text[text.length - half]) ? text.length - half + 1 : text.length - half);
+  return head + notice(text.length - head.length - tail.length) + tail;
 }
 export function localDay(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 const otherWriter = (file: string) => new Error(`Another process wrote ${file}. Close every other Pi on this profile and restart Pi; nothing was written.`);
-/** With `size`, refuses to append unless the file still has that size. Returns the new size. */
+/** With `size`, refuses to append unless the file still has that size. A last line left without its newline is ended first. Returns the new size. */
 export function appendJson(file: string, value: unknown, size?: number) {
-  const fd = openSync(file, 'a', 0o600);
+  const fd = openSync(file, 'a+', 0o600);
   try {
-    if (size !== undefined && fstatSync(fd).size !== size) throw otherWriter(file);
-    const data = Buffer.from(JSON.stringify(value) + '\n');
+    const length = fstatSync(fd).size, last = Buffer.alloc(1);
+    if (size !== undefined && length !== size) throw otherWriter(file);
+    const torn = length > 0 && readSync(fd, last, 0, 1, length - 1) === 1 && last[0] !== 0x0a;
+    const data = Buffer.from((torn ? '\n' : '') + JSON.stringify(value) + '\n');
     if (writeSync(fd, data) !== data.length) throw new Error(`Incomplete write: ${file}`);
     fsyncSync(fd);
     return fstatSync(fd).size;
@@ -47,15 +52,10 @@ function records(dir: string, warn: (s: string) => void): unknown[] {
   const result: unknown[] = [];
   for (const name of readdirSync(dir).filter(n => n.endsWith('.jsonl')).sort()) {
     const file = join(dir, name);
-    const text = readFileSync(file, 'utf8');
-    for (const [index, line] of text.split('\n').entries()) {
+    for (const [index, line] of readFileSync(file, 'utf8').split('\n').entries()) {
       if (!line.trim()) continue;
       try { result.push(JSON.parse(line)); }
       catch { warn(`Skipped damaged JSON at ${file}:${index + 1}`); }
-    }
-    if (text && !text.endsWith('\n')) {
-      const fd = openSync(file, 'a');
-      try { writeSync(fd, '\n'); fsyncSync(fd); } finally { closeSync(fd); }
     }
   }
   return result;
@@ -99,15 +99,14 @@ export class Memory {
     for (const sub of ['main', 'tree']) mkdirSync(join(directory, sub), { recursive: true, mode: 0o700 });
     const main = join(directory, 'main'), log = records(main, warn);
     for (const name of readdirSync(main).filter(n => n.endsWith('.jsonl'))) this.lastSeenBytes.set(join(main, name), statSync(join(main, name)).size);
-    for (const value of log) {
-      if (!isEntry(value) || value.i !== this.root.length) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
-      this.root.push({ ...value, size: bytes(`${value.kind}: ${value.text}`) });
-    }
+    const entries = log.every(isEntry) ? log.sort((a, b) => a.i - b.i) : undefined;
+    if (!entries || entries.some((entry, i) => entry.i !== i)) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
+    for (const value of entries) this.root.push({ ...value, size: bytes(`${value.kind}: ${value.text}`) });
     for (const value of records(join(directory, 'tree'), warn)) {
       if (!isSummary(value) || value.l < 0 || value.i < 0 || end(value) > this.root.length)
         throw new Error('Invalid OptChat summary record.');
       if (value.l === 0 && !this.tree.has(key(value))) this.leaves++;
-      this.tree.set(key(value), { ...value, size: bytes(value.text) });
+      this.tree.set(key(value), { ...value, size: lineBytes(value.text) });
     }
     // Fold history in order; do not retile the entire log on each turn.
     for (let i = 0; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
@@ -207,7 +206,7 @@ export class Memory {
       historical: this.root.slice(start(part), end(part)).some(entry => !!entry.origin) }, this.controller.signal)).trim();
     if (this.stopped) return;
     if (!text) throw new Error('Compactor returned an empty summary.');
-    const node = { ...part, text, size: bytes(text) };
+    const node = { ...part, text, size: lineBytes(text) };
     appendJson(join(this.directory, 'tree', `${localDay()}.jsonl`), node);
     this.tree.set(key(part), node); this.retryAt.delete(key(part));
     // A leaf is usually still in the view when built, but after a damaged tree file a saved parent can already hide it.
