@@ -124,11 +124,11 @@ Pick the destination profile, then run `/optchat import`.
    - **Rebuild by conversation start date**: regenerate the whole tree, ordered by conversation start.
 4. **Preview**: destination, new and duplicate counts, text size, rough token estimate, and compactor. This is not a price quote.
 
-**What gets imported**: user messages and final assistant replies, with original dates and source labels, as in Victor's recipe. Tool calls and results, intermediate commentary, reasoning, subagent transcripts, replayed context, and image/audio/file bytes are left out. ChatGPT alternate branches are labelled as alternatives. Imported records are marked as historical so old requests are not treated as new instructions.
+**What gets imported**: user messages and final assistant replies, with original dates and source labels, as in Victor's recipe. Tool calls and results, intermediate commentary, reasoning, subagent transcripts, replayed context, and image/audio/file bytes are left out. So is the text each source adds around what you typed. For Claude Code, that is slash-command and shell-command output and a slash command without arguments. A typed command stays as `/name args` or `!command`. For Codex, it is the context messages Codex injects, such as the AGENTS.md instructions and the environment context. None of these becomes a conversation's title. ChatGPT alternate branches are labelled as alternatives. Imported records are marked as historical so old requests are not treated as new instructions.
 
 **Claude Code memories**: the auto-memory topic files in `~/.claude/projects/*/memory/` (not `MEMORY.md`, which only indexes them), picked by project. Each file becomes one dated note in the memory tree, not part of the prompt. An edited file comes in again as a newer note.
 
-**Duplicates**: re-importing skips messages already present, even if titles or paths changed. Changed source messages can appear as a separate historical version.
+**Duplicates**: re-importing skips messages already present, even if titles or paths changed. A resumed Claude Code transcript copies the earlier messages into a new file. They keep the session they came from, so they count once. Changed source messages can appear as a separate historical version.
 
 **Pausing**: **Pause import** (or Escape) saves progress, and so does restarting Pi. `/optchat import` then offers **Resume** or **Discard staged import**. While an import is pending, chat in that profile is blocked; other profiles still work. Imports need the main agent and its subagents to be idle.
 
@@ -194,7 +194,7 @@ pi install .
 Restart Pi after source changes. Use `OPTCHAT_HOME` to test against a throwaway data directory.
 
 ```sh
-npm run check      # type check
+npm run check      # type check and lint
 npm test           # offline tests, no paid model calls
 npm run test:live  # paid Anthropic calls on synthetic data in a disposable profile
 ```
