@@ -16,10 +16,27 @@ export interface Conversation {
   exported?: Record<string, unknown>;
 }
 export interface Scan { conversations: Conversation[]; warnings: string[] }
+export interface Read { entries: ImportedEntry[]; warnings: string[] }
+/** Everything one import source decides. `adapters` must hold one per `Source`, so a new source fails to compile until it has every part. */
+export interface Adapter {
+  /** Source picker row. */
+  label: string;
+  /** Words the picker uses for what this source holds. */
+  words: { plural: string; singular: string; item: string; preview: string };
+  /** Whether the picker asks which projects to import. */
+  byProject: boolean;
+  /** Prompt for the path to import from. A source that reads fixed local folders has none. */
+  input?: string;
+  /** Lists what can be imported. `location` is the path the user typed, or a folder that replaces the default one. */
+  scan(location: string | undefined, signal?: AbortSignal): Promise<Scan>;
+  /** The importable messages of one scanned conversation. */
+  entries(c: Conversation, signal?: AbortSignal): Promise<Read>;
+  /** What the user typed in a user message: '' when it holds only this source's own scaffolding. Titles and entries both read it. */
+  scaffold(content: unknown): string;
+}
 const exec = promisify(execFile);
 const string = (v: unknown) => typeof v === 'string' ? v : undefined;
-const codexSubagent = (metadata: Record<string, unknown>) => metadata.source === 'subagent'
-  || record(metadata.source) && 'subagent' in metadata.source;
+const codexSubagent = ({ source }: Record<string, unknown>) => source === 'subagent' || record(source) && 'subagent' in source;
 const missingSource = (error: unknown) => record(error) && (error.code === 'ENOENT' || error.code === 'ENOTDIR');
 const missingWarning = (file: string) => `${file}: source file is no longer available; conversation skipped. Rescan to retry if it returns.`;
 export function timestamp(value: unknown, fallback: string): string {
@@ -28,11 +45,12 @@ export function timestamp(value: unknown, fallback: string): string {
 }
 /** Header time: minutes are enough to place a message, and the rest of an ISO stamp costs summary bytes. */
 const minute = (date: string) => `${date.slice(0, 16).replace('T', ' ')}Z`;
+const byRecent = (conversations: Conversation[]) => conversations.sort((a, b) => b.date.localeCompare(a.date));
 /**
  * Claude Code logs slash commands, `!` shell commands, and their local output as user messages. Returns undefined
  * for anything else, '' for scaffolding to drop, or what the user typed (`/name args`, `!command`), a real request.
  */
-export function claudeCommand(content: string): string | undefined {
+function claudeCommand(content: string): string | undefined {
   const s = content.trimStart();
   if (/^<(local-command|bash)-(stdout|stderr)>/.test(s)) return '';
   const shell = /^<bash-input>([\s\S]*?)<\/bash-input>/.exec(s)?.[1].trim();
@@ -76,6 +94,7 @@ async function* jsonLines(file: string, warnings: string[], limit = Infinity, si
     }
   } finally { lines.close(); stream.destroy(); }
 }
+type Records = AsyncGenerator<{ value: Record<string, unknown>; line: number }>;
 async function filesUnder(path: string, accept: (name: string) => boolean, signal?: AbortSignal): Promise<string[]> {
   signal?.throwIfAborted();
   const entries = await readdir(path, { withFileTypes: true }).catch(error => {
@@ -89,166 +108,205 @@ async function filesUnder(path: string, accept: (name: string) => boolean, signa
   }
   return files.sort();
 }
-export async function scanLocal(source: 'claude' | 'codex', roots?: string[], signal?: AbortSignal): Promise<Scan> {
-  const folders = roots ?? (source === 'claude' ? [join(homedir(), '.claude/projects')]
-    : [join(homedir(), '.codex/sessions'), join(homedir(), '.codex/archived_sessions')]);
+
+interface Meta { id: string; project: string; date: string; title: string }
+interface Transcripts {
+  folders: string[]; accept(name: string): boolean; skip?(folder: string, file: string): boolean;
+  /** Reads the file's first `limit` lines. Returns what the picker shows, or undefined to skip a delegated run. */
+  limit: number; meta(records: Records, meta: Meta): Promise<Meta | undefined>;
+}
+async function scanTranscripts(source: 'claude' | 'codex', t: Transcripts, signal?: AbortSignal): Promise<Scan> {
   const conversations: Conversation[] = [], warnings: string[] = [];
-  // Claude workflow journals contain orchestration events, not conversation messages.
-  for (const folder of folders) for (const file of await filesUnder(folder, n => n.endsWith('.jsonl') && !(source === 'claude' && n === 'journal.jsonl'), signal)) {
+  for (const folder of t.folders) for (const file of await filesUnder(folder, t.accept, signal)) {
     signal?.throwIfAborted();
-    // Import user conversations, not separate delegated runs (including Claude's older flat layout).
-    if (source === 'claude' && (relative(folder, dirname(file)).split(/[\\/]/).includes('subagents') || basename(file).startsWith('agent-'))) continue;
+    if (t.skip?.(folder, file)) continue;
     try {
       const info = await stat(file);
-      let id = basename(file, '.jsonl'), project = dirname(file), date = info.mtime.toISOString(), title = '';
-      let sidechain = false;
-      for await (const { value: v, line } of jsonLines(file, warnings, source === 'claude' ? Infinity : 60, signal)) {
-        // Sidechain markers can appear late; picker metadata still comes from the first 60 lines.
-        if (source === 'claude' && v.isSidechain === true) { sidechain = true; break; }
-        if (line > 60) continue;
-        if (source === 'codex' && v.type === 'session_meta' && record(v.payload)) {
-          if (codexSubagent(v.payload)) { sidechain = true; break; }
-          id = string(v.payload.id) ?? id; project = string(v.payload.cwd) ?? project; date = timestamp(v.payload.timestamp ?? v.timestamp, date);
-        }
-        if (source === 'claude') {
-          id = string(v.sessionId) ?? id;
-          project = string(v.cwd) ?? project;
-          if (v.type === 'custom-title' || v.type === 'ai-title') title = string(v.customTitle ?? v.aiTitle) ?? title;
-        }
-        const m = source === 'claude' ? v.message : v.type === 'response_item' ? v.payload : undefined;
-        const typed = record(m) && m.role === 'user' && !title ? text(m.content) : '';
-        const first = source === 'claude' ? claudeCommand(typed) ?? typed : typed;
-        if (first.trim()) {
-          title = first.replace(/\s+/g, ' ').slice(0, 110);
-          date = timestamp(v.timestamp, date);
-        }
-      }
-      if (sidechain) continue;
-      conversations.push({ source, file, id, project, date, title: title || id, size: info.size });
+      const meta = await t.meta(jsonLines(file, warnings, t.limit, signal), { id: basename(file, '.jsonl'), project: dirname(file), date: info.mtime.toISOString(), title: '' });
+      if (meta) conversations.push({ source, file, ...meta, title: meta.title || meta.id, size: info.size });
     } catch (error) {
       signal?.throwIfAborted();
       if (!missingSource(error)) throw error;
       warnings.push(missingWarning(file));
     }
   }
-  return { conversations: conversations.sort((a, b) => b.date.localeCompare(a.date)), warnings };
+  return { conversations: byRecent(conversations), warnings };
 }
-export async function scanChatGPT(input: string, signal?: AbortSignal): Promise<Scan> {
-  const path = resolve(input.startsWith('~/') ? join(homedir(), input.slice(2)) : input);
-  const info = await stat(path);
-  const documents: { file: string; content: string }[] = [];
-  const accept = (name: string) => /^conversations(?:[-_]?\d+)?\.json$/i.test(basename(name));
-  if (info.isDirectory()) {
-    for (const file of await filesUnder(path, accept, signal)) documents.push({ file, content: await readFile(file, { encoding: 'utf8', signal }) });
-  } else if (path.toLowerCase().endsWith('.zip')) {
-    const listing = await exec('unzip', ['-Z1', path], { signal, maxBuffer: 10_000_000 });
-    for (const name of listing.stdout.split('\n').filter(accept)) {
-      const result = await exec('unzip', ['-p', path, name], { signal, maxBuffer: 1_000_000_000 });
-      documents.push({ file: `${path}:${name}`, content: result.stdout });
+/** Replies wait in `pending` until something marks them final, so a tool loop's progress text never reaches memory. */
+function turns(c: Conversation) {
+  const entries: ImportedEntry[] = [];
+  let pending: ImportedEntry[] = [];
+  const finish = () => { entries.push(...pending); pending = []; };
+  return {
+    entries, finish,
+    reset: () => { pending = []; },
+    add(id: string, kind: Kind, content: string, date: string, identity = content) { const entry = imported(c, id, kind, content, date, identity); if (entry) entries.push(entry); },
+    assistant(parts: { id: string; content: string }[], date: string, final: boolean) {
+      pending = parts.flatMap(part => { const entry = imported(c, part.id, 'talk', part.content, date); return entry ? [entry] : []; });
+      if (final) finish();
+    },
+  };
+}
+type Turns = ReturnType<typeof turns>;
+/** `step` returns 'drop' when the whole conversation is not importable (a delegated run). */
+async function readTranscript(c: Conversation, signal: AbortSignal | undefined, step: (v: Record<string, unknown>, line: number, date: string, t: Turns, warnings: string[]) => 'drop' | void): Promise<Read> {
+  const warnings: string[] = [], t = turns(c);
+  try {
+    for await (const { value, line } of jsonLines(c.file, warnings, Infinity, signal)) {
+      if (step(value, line, timestamp(value.timestamp, c.date), t, warnings) === 'drop') return { entries: [], warnings };
     }
-  } else documents.push({ file: path, content: await readFile(path, { encoding: 'utf8', signal }) });
-  if (!documents.length) throw new Error('No conversations.json or numbered conversation JSON files found. Select a ChatGPT export ZIP, extracted folder, or JSON file.');
-  const conversations: Conversation[] = [], warnings: string[] = [];
-  for (const doc of documents) {
-    const data: unknown = JSON.parse(doc.content);
-    if (!Array.isArray(data)) throw new Error(`${doc.file}: expected an array of exported ChatGPT conversations.`);
-    for (const value of data) {
-      if (!record(value) || !record(value.mapping) || typeof (value.id ?? value.conversation_id) !== 'string') {
-        warnings.push(`${doc.file}: unrecognized conversation skipped`); continue;
-      }
-      const id = String(value.id ?? value.conversation_id);
-      conversations.push({ source: 'chatgpt', id, file: doc.file, title: string(value.title) ?? id,
-        project: 'ChatGPT', date: timestamp(value.create_time, info.mtime.toISOString()), size: bytes(JSON.stringify(value)), exported: value });
-    }
-  }
-  return { conversations: conversations.sort((a, b) => b.date.localeCompare(a.date)), warnings };
-}
-
-/** Claude Code auto memory: one note per topic file. MEMORY.md is only an index of those files. */
-export async function scanClaudeMemories(root = join(homedir(), '.claude/projects'), signal?: AbortSignal): Promise<Scan> {
-  const conversations: Conversation[] = [], warnings: string[] = [];
-  const dirs = await readdir(root, { withFileTypes: true }).catch(error => { if (missingSource(error)) return []; throw error; });
-  for (const dir of dirs.filter(d => d.isDirectory()).map(d => d.name).sort()) {
-    signal?.throwIfAborted();
-    const folder = join(root, dir, 'memory');
-    const files = (await readdir(folder, { withFileTypes: true }).catch(error => { if (missingSource(error)) return []; throw error; }))
-      .filter(f => f.isFile() && f.name.endsWith('.md') && f.name !== 'MEMORY.md').map(f => f.name).sort();
-    if (!files.length) continue;
-    const project = await claudeProject(join(root, dir), dir, signal);
-    for (const name of files) {
-      const file = join(folder, name);
-      try {
-        const [info, content] = await Promise.all([stat(file), readFile(file, { encoding: 'utf8', signal })]);
-        const { fields } = frontmatter(content);
-        conversations.push({ source: 'claude-memory', id: `${dir}/${name}`, file, project, size: info.size,
-          title: fields.get('name') ?? basename(name, '.md'), date: timestamp(fields.get('modified'), info.mtime.toISOString()) });
-      } catch (error) {
-        signal?.throwIfAborted();
-        if (!missingSource(error)) throw error;
-        warnings.push(`${file}: memory file is no longer available; skipped.`);
-      }
-    }
-  }
-  return { conversations: conversations.sort((a, b) => b.date.localeCompare(a.date)), warnings };
-}
-/** Claude names project folders after the launch directory with every other character replaced by '-'. Recover it from a transcript. */
-async function claudeProject(folder: string, name: string, signal?: AbortSignal): Promise<string> {
-  const transcripts = (await readdir(folder)).filter(f => f.endsWith('.jsonl')).sort();
-  for (const transcript of transcripts) {
-    try {
-      for await (const { value } of jsonLines(join(folder, transcript), [], 60, signal)) {
-        const cwd = string(value.cwd);
-        if (cwd && cwd.replace(/[^a-zA-Z0-9]/g, '-') === name) return cwd;
-      }
-    } catch (error) { signal?.throwIfAborted(); if (!missingSource(error)) throw error; }
-  }
-  return name; // Transcripts can be cleaned up while memory remains.
-}
-function frontmatter(content: string) {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(content);
-  const fields = new Map<string, string>();
-  for (const line of match ? match[1].split(/\r?\n/) : []) {
-    // Newer files nest type/modified under `metadata:`; the first occurrence of each key wins.
-    const m = /^\s*([A-Za-z]+):\s*(.+?)\s*$/.exec(line);
-    if (m && !fields.has(m[1])) fields.set(m[1], unquote(m[2]));
-  }
-  return { fields, body: match ? content.slice(match[0].length) : content };
-}
-function unquote(value: string): string {
-  if (value.startsWith('"')) { try { const parsed: unknown = JSON.parse(value); if (typeof parsed === 'string') return parsed; } catch { /* plain text */ } }
-  if (/^'.*'$/.test(value)) return value.slice(1, -1).replaceAll("''", "'");
-  return value;
-}
-async function readMemory(c: Conversation, signal?: AbortSignal): Promise<{ entries: ImportedEntry[]; warnings: string[] }> {
-  let content: string, modified: Date;
-  try { [content, { mtime: modified }] = await Promise.all([readFile(c.file, { encoding: 'utf8', signal }), stat(c.file)]); } catch (error) {
+    t.finish(); // Older exports may omit explicit final markers; retain only the last text reply.
+  } catch (error) {
     signal?.throwIfAborted();
     if (!missingSource(error)) throw error;
-    return { entries: [], warnings: [`${c.file}: memory file is no longer available; skipped.`] };
+    // Do not stage a partial conversation if the source becomes unavailable mid-read.
+    return { entries: [], warnings: [...warnings, missingWarning(c.file)] };
   }
-  const { fields, body } = frontmatter(content);
-  if (!body.trim()) return { entries: [], warnings: [] };
-  const one = (s: string) => s.replace(/\s+/g, ' ').trim();
-  const name = one(fields.get('name') ?? c.title), type = fields.get('type'), description = fields.get('description');
-  // The whole file is the identity, so an edited memory arrives as a newer note and an unchanged one is skipped.
-  const hash = digest(content);
-  // Date the note from this read, not the earlier scan, in case Claude edited the file meanwhile.
-  const date = timestamp(fields.get('modified'), modified.toISOString());
-  return { warnings: [], entries: [{ kind: 'note', date,
-    origin: { source: c.source, conversation: c.id, message: hash.slice(0, 16), title: name, project: c.project },
-    text: `[Historical Claude Code memory · ${minute(date)} · project ${c.project}${type ? ` · type ${one(type)}` : ''} · ${name}]\n${description ? one(description) + '\n\n' : ''}${body.trim()}`,
-    receipt: `import:${digest(JSON.stringify([c.source, c.id, hash]))}` }] };
+  return { entries: t.entries, warnings };
 }
 
-export async function readConversation(c: Conversation, signal?: AbortSignal): Promise<{ entries: ImportedEntry[]; warnings: string[] }> {
-  signal?.throwIfAborted();
-  if (c.source === 'claude-memory') return readMemory(c, signal);
-  const entries: ImportedEntry[] = [], warnings: string[] = [];
-  const add = (id: string, kind: Kind, value: string, date: string, identity = value) => { const entry = imported(c, id, kind, value, date, identity); if (entry) entries.push(entry); };
-  if (c.source === 'chatgpt') {
+const claudeScaffold = (content: unknown) => { const typed = text(content); return claudeCommand(typed) ?? typed; };
+const claude: Adapter = {
+  label: 'Claude Code',
+  words: { plural: 'Conversations', singular: 'Conversation', item: 'messages', preview: 'Historical user messages and final replies; tool activity excluded.' },
+  byProject: true,
+  scaffold: claudeScaffold,
+  scan: (location, signal) => scanTranscripts('claude', {
+    folders: [location ?? join(homedir(), '.claude/projects')], limit: Infinity,
+    // Claude workflow journals contain orchestration events, not conversation messages.
+    accept: name => name.endsWith('.jsonl') && name !== 'journal.jsonl',
+    // Import user conversations, not separate delegated runs (including Claude's older flat layout).
+    skip: (folder, file) => relative(folder, dirname(file)).split(/[\\/]/).includes('subagents') || basename(file).startsWith('agent-'),
+    async meta(records, meta) {
+      for await (const { value: v, line } of records) {
+        // Sidechain markers can appear late; picker metadata still comes from the first 60 lines.
+        if (v.isSidechain === true) return undefined;
+        if (line > 60) continue;
+        meta.id = string(v.sessionId) ?? meta.id;
+        meta.project = string(v.cwd) ?? meta.project;
+        if (v.type === 'custom-title' || v.type === 'ai-title') meta.title = string(v.customTitle ?? v.aiTitle) ?? meta.title;
+        const typed = record(v.message) && v.message.role === 'user' && !meta.title ? claudeScaffold(v.message.content) : '';
+        if (typed.trim()) { meta.title = typed.replace(/\s+/g, ' ').slice(0, 110); meta.date = timestamp(v.timestamp, meta.date); }
+      }
+      return meta;
+    },
+  }, signal),
+  entries: (c, signal) => readTranscript(c, signal, (v, line, date, t, warnings) => {
+    // Context replay and compaction scaffolding are not new user requests.
+    if (v.type === 'system' && v.subtype === 'compact_boundary') { t.reset(); return; }
+    if (v.isMeta === true || v.isCompactSummary === true) return;
+    if (v.isSidechain === true) return 'drop';
+    if (!['user', 'assistant'].includes(String(v.type)) || !record(v.message)) return;
+    const m = v.message, id = string(v.uuid) ?? `line:${line}`;
+    if (m.role === 'user' && typeof m.content === 'string' && /^\[Request interrupted by user(?: for tool use)?\]$/.test(m.content)) { t.reset(); return; }
+    const blocks = Array.isArray(m.content) ? m.content : [];
+    const toolActivity = blocks.some(b => record(b) && (['tool_use', 'server_tool_use', 'tool_result'].includes(String(b.type)) || String(b.type).endsWith('_tool_result')));
+    if (toolActivity) t.reset();
+    const parts = typeof m.content === 'string' ? [{ id, content: m.content }] : blocks.flatMap((b, index) => {
+      if (!record(b)) return [];
+      if (['text', 'image', 'image_url', 'document'].includes(String(b.type))) {
+        const content = b.type === 'document' ? '[document attachment; binary content is not imported]' : text(b);
+        return content ? [{ id: `${id}:${index}`, content }] : [];
+      }
+      if (!['tool_use', 'server_tool_use', 'tool_result', 'thinking', 'redacted_thinking', 'reasoning', 'encrypted_content'].includes(String(b.type)) && !String(b.type).endsWith('_tool_result'))
+        warnings.push(`${c.file}:${line}: unsupported Claude content block ${String(b.type)} skipped`);
+      return [];
+    });
+    // Receipts keep the raw text, so a command already imported is still recognized.
+    if (m.role === 'user' && parts.length) { t.finish(); for (const part of parts) t.add(part.id, 'user', claudeScaffold(part.content), date, part.content); }
+    else if (m.role === 'assistant') {
+      const final = m.stop_reason === 'end_turn' || m.stop_reason === 'stop_sequence';
+      if (toolActivity || v.isApiErrorMessage === true || m.stop_reason && !final) t.reset();
+      else if (parts.length) t.assistant(parts, date, final);
+      else if (!final) t.reset();
+    }
+  }),
+};
+
+const codexScaffold = text;
+const codex: Adapter = {
+  label: 'Codex',
+  words: claude.words,
+  byProject: true,
+  scaffold: codexScaffold,
+  scan: (location, signal) => scanTranscripts('codex', {
+    folders: location ? [location] : [join(homedir(), '.codex/sessions'), join(homedir(), '.codex/archived_sessions')], limit: 60,
+    accept: name => name.endsWith('.jsonl'),
+    async meta(records, meta) {
+      for await (const { value: v } of records) {
+        if (v.type === 'session_meta' && record(v.payload)) {
+          if (codexSubagent(v.payload)) return undefined;
+          meta.id = string(v.payload.id) ?? meta.id; meta.project = string(v.payload.cwd) ?? meta.project; meta.date = timestamp(v.payload.timestamp ?? v.timestamp, meta.date);
+        }
+        const typed = v.type === 'response_item' && record(v.payload) && v.payload.role === 'user' && !meta.title ? codexScaffold(v.payload.content) : '';
+        if (typed.trim()) { meta.title = typed.replace(/\s+/g, ' ').slice(0, 110); meta.date = timestamp(v.timestamp, meta.date); }
+      }
+      return meta;
+    },
+  }, signal),
+  entries: (c, signal) => readTranscript(c, signal, (v, line, date, t, warnings) => {
+    if (v.type === 'session_meta' && record(v.payload) && codexSubagent(v.payload)) return 'drop';
+    if (v.type === 'event_msg' && record(v.payload)) {
+      if (v.payload.type === 'task_complete') t.finish();
+      if (['turn_aborted', 'task_started', 'task_failed'].includes(String(v.payload.type))) t.reset();
+    }
+    if (v.type === 'response_item' && record(v.payload)) {
+      const m = v.payload, id = string(m.id) ?? string(m.call_id) ?? `line:${line}`;
+      if (m.type === 'message' && m.role === 'user') { t.finish(); t.add(id, 'user', codexScaffold(m.content), date, text(m.content)); }
+      else if (m.type === 'message' && m.role === 'assistant') {
+        t.reset();
+        const channel = m.channel ?? m.phase;
+        const final = channel === 'final' || channel === 'final_answer';
+        if (!channel || final) t.assistant([{ id, content: text(m.content) }], date, final);
+      } else if (['function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output', 'web_search_call', 'image_generation_call', 'local_shell_call', 'agent_message'].includes(String(m.type))) t.reset();
+      else if (!['message', 'reasoning'].includes(String(m.type))) { t.reset(); warnings.push(`${c.file}:${line}: unsupported response item ${String(m.type)} skipped`); }
+    }
+  }),
+};
+
+const chatgpt: Adapter = {
+  label: 'ChatGPT export',
+  words: claude.words,
+  byProject: false,
+  input: 'ChatGPT export ZIP, extracted folder, or conversations JSON path',
+  scaffold: text,
+  async scan(location, signal) {
+    if (!location) throw new Error('Select a ChatGPT export ZIP, extracted folder, or JSON file.');
+    const path = resolve(location.startsWith('~/') ? join(homedir(), location.slice(2)) : location);
+    const info = await stat(path);
+    const documents: { file: string; content: string }[] = [];
+    const accept = (name: string) => /^conversations(?:[-_]?\d+)?\.json$/i.test(basename(name));
+    if (info.isDirectory()) {
+      for (const file of await filesUnder(path, accept, signal)) documents.push({ file, content: await readFile(file, { encoding: 'utf8', signal }) });
+    } else if (path.toLowerCase().endsWith('.zip')) {
+      const listing = await exec('unzip', ['-Z1', path], { signal, maxBuffer: 10_000_000 });
+      for (const name of listing.stdout.split('\n').filter(accept)) {
+        const result = await exec('unzip', ['-p', path, name], { signal, maxBuffer: 1_000_000_000 });
+        documents.push({ file: `${path}:${name}`, content: result.stdout });
+      }
+    } else documents.push({ file: path, content: await readFile(path, { encoding: 'utf8', signal }) });
+    if (!documents.length) throw new Error('No conversations.json or numbered conversation JSON files found. Select a ChatGPT export ZIP, extracted folder, or JSON file.');
+    const conversations: Conversation[] = [], warnings: string[] = [];
+    for (const doc of documents) {
+      const data: unknown = JSON.parse(doc.content);
+      if (!Array.isArray(data)) throw new Error(`${doc.file}: expected an array of exported ChatGPT conversations.`);
+      for (const value of data) {
+        if (!record(value) || !record(value.mapping) || typeof (value.id ?? value.conversation_id) !== 'string') {
+          warnings.push(`${doc.file}: unrecognized conversation skipped`); continue;
+        }
+        const id = String(value.id ?? value.conversation_id);
+        conversations.push({ source: 'chatgpt', id, file: doc.file, title: string(value.title) ?? id,
+          project: 'ChatGPT', date: timestamp(value.create_time, info.mtime.toISOString()), size: bytes(JSON.stringify(value)), exported: value });
+      }
+    }
+    return { conversations: byRecent(conversations), warnings };
+  },
+  async entries(c, signal) {
+    const entries: ImportedEntry[] = [];
+    const add = (id: string, kind: Kind, value: string, date: string, identity = value) => { const entry = imported(c, id, kind, value, date, identity); if (entry) entries.push(entry); };
     const mapping = c.exported?.mapping;
     if (!record(mapping)) throw new Error('ChatGPT conversation has no message mapping.');
-    // Include every branch once. Parent-first traversal handles missing child timestamps.
+    // Include every branch once. Parent-first order handles missing child timestamps.
     const nodes = Object.entries(mapping).filter((pair): pair is [string, Record<string, unknown>] => record(pair[1]));
     nodes.sort((a, b) => timestamp(record(a[1].message) ? a[1].message.create_time : undefined, c.date)
       .localeCompare(timestamp(record(b[1].message) ? b[1].message.create_time : undefined, c.date)));
@@ -295,7 +353,7 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
       const kind = m.author.role === 'user' ? 'user' : 'talk';
       if (kind === 'talk' && (m.status && m.status !== 'finished_successfully'
         || m.end_turn === false || m.channel !== 'final' && m.end_turn !== true && intermediate.has(key))) continue;
-      const content = text(m.content); if (!content) continue;
+      const content = kind === 'user' ? chatgpt.scaffold(m.content) : text(m.content); if (!content) continue;
       const branch = hasSelectedBranch ? selected.has(key) ? 'selected branch at export' : 'alternate branch, not the selected outcome' : 'branch selection unavailable';
       add(string(m.id) ?? key, kind, `[message ${key}; parent ${String(node.parent ?? 'root')}; ${branch}${m.recipient ? `; recipient ${String(m.recipient)}` : ''}]\n${content}`, date, content);
     }
@@ -303,73 +361,97 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
       const snapshot = timestamp(c.exported?.update_time, c.date);
       add('export:selected-branch', 'note', `Selected ChatGPT branch in the ${snapshot} export snapshot ends at message ${String(c.exported?.current_node)}. Other branches are alternatives.`, snapshot);
     }
-  } else {
-    let pending: ImportedEntry[] = [];
-    const finish = () => { entries.push(...pending); pending = []; };
-    const assistant = (parts: { id: string; content: string }[], date: string, final: boolean) => {
-      pending = parts.flatMap(part => {
-        const entry = imported(c, part.id, 'talk', part.content, date);
-        return entry ? [entry] : [];
-      });
-      if (final) finish();
-    };
-    try {
-      for await (const { value: v, line } of jsonLines(c.file, warnings, Infinity, signal)) {
-        const date = timestamp(v.timestamp, c.date);
-        // Context replay and compaction scaffolding are not new user requests.
-        if (c.source === 'claude' && v.type === 'system' && v.subtype === 'compact_boundary') { pending = []; continue; }
-        if (c.source === 'claude' && (v.isMeta === true || v.isCompactSummary === true)) continue;
-        if (c.source === 'claude' && v.isSidechain === true) return { entries: [], warnings };
-        if (c.source === 'claude' && ['user', 'assistant'].includes(String(v.type)) && record(v.message)) {
-          const m = v.message, id = string(v.uuid) ?? `line:${line}`;
-          if (m.role === 'user' && typeof m.content === 'string' && /^\[Request interrupted by user(?: for tool use)?\]$/.test(m.content)) { pending = []; continue; }
-          const blocks = Array.isArray(m.content) ? m.content : [];
-          const toolActivity = blocks.some(b => record(b) && (['tool_use', 'server_tool_use', 'tool_result'].includes(String(b.type)) || String(b.type).endsWith('_tool_result')));
-          if (toolActivity) pending = [];
-          const parts = typeof m.content === 'string' ? [{ id, content: m.content }] : blocks.flatMap((b, index) => {
-            if (!record(b)) return [];
-            if (['text', 'image', 'image_url', 'document'].includes(String(b.type))) {
-              const content = b.type === 'document' ? '[document attachment; binary content is not imported]' : text(b);
-              return content ? [{ id: `${id}:${index}`, content }] : [];
-            }
-            if (!['tool_use', 'server_tool_use', 'tool_result', 'thinking', 'redacted_thinking', 'reasoning', 'encrypted_content'].includes(String(b.type)) && !String(b.type).endsWith('_tool_result'))
-              warnings.push(`${c.file}:${line}: unsupported Claude content block ${String(b.type)} skipped`);
-            return [];
-          });
-          // Receipts keep the raw text, so a command already imported is still recognized.
-          if (m.role === 'user' && parts.length) { finish(); for (const part of parts) add(part.id, 'user', claudeCommand(part.content) ?? part.content, date, part.content); }
-          else if (m.role === 'assistant') {
-            const final = m.stop_reason === 'end_turn' || m.stop_reason === 'stop_sequence';
-            if (toolActivity || v.isApiErrorMessage === true || m.stop_reason && !final) pending = [];
-            else if (parts.length) assistant(parts, date, final);
-            else if (!final) pending = [];
-          }
-        }
-        if (c.source === 'codex' && v.type === 'session_meta' && record(v.payload) && codexSubagent(v.payload)) return { entries: [], warnings };
-        if (c.source === 'codex' && v.type === 'event_msg' && record(v.payload)) {
-          if (v.payload.type === 'task_complete') finish();
-          if (['turn_aborted', 'task_started', 'task_failed'].includes(String(v.payload.type))) pending = [];
-        }
-        if (c.source === 'codex' && v.type === 'response_item' && record(v.payload)) {
-          const m = v.payload, id = string(m.id) ?? string(m.call_id) ?? `line:${line}`;
-          if (m.type === 'message' && m.role === 'user') { finish(); add(id, 'user', text(m.content), date); }
-          else if (m.type === 'message' && m.role === 'assistant') {
-            pending = [];
-            const channel = m.channel ?? m.phase;
-            const final = channel === 'final' || channel === 'final_answer';
-            if (!channel || final) assistant([{ id, content: text(m.content) }], date, final);
-          } else if (['function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output', 'web_search_call', 'image_generation_call', 'local_shell_call', 'agent_message'].includes(String(m.type))) pending = [];
-          else if (!['message', 'reasoning'].includes(String(m.type))) { pending = []; warnings.push(`${c.file}:${line}: unsupported response item ${String(m.type)} skipped`); }
+    return { entries, warnings: [] };
+  },
+};
+
+/** Claude Code auto memory: one note per topic file. MEMORY.md is only an index of those files. */
+const claudeMemory: Adapter = {
+  label: 'Claude Code memories',
+  words: { plural: 'Memories', singular: 'Memory', item: 'notes', preview: 'Each memory file as one dated historical note; MEMORY.md indexes excluded.' },
+  byProject: true,
+  scaffold: text,
+  async scan(location, signal) {
+    const root = location ?? join(homedir(), '.claude/projects');
+    const conversations: Conversation[] = [], warnings: string[] = [];
+    const dirs = await readdir(root, { withFileTypes: true }).catch(error => { if (missingSource(error)) return []; throw error; });
+    for (const dir of dirs.filter(d => d.isDirectory()).map(d => d.name).sort()) {
+      signal?.throwIfAborted();
+      const folder = join(root, dir, 'memory');
+      const files = (await readdir(folder, { withFileTypes: true }).catch(error => { if (missingSource(error)) return []; throw error; }))
+        .filter(f => f.isFile() && f.name.endsWith('.md') && f.name !== 'MEMORY.md').map(f => f.name).sort();
+      if (!files.length) continue;
+      const project = await claudeProject(join(root, dir), dir, signal);
+      for (const name of files) {
+        const file = join(folder, name);
+        try {
+          const [info, content] = await Promise.all([stat(file), readFile(file, { encoding: 'utf8', signal })]);
+          const { fields } = frontmatter(content);
+          conversations.push({ source: 'claude-memory', id: `${dir}/${name}`, file, project, size: info.size,
+            title: fields.get('name') ?? basename(name, '.md'), date: timestamp(fields.get('modified'), info.mtime.toISOString()) });
+        } catch (error) {
+          signal?.throwIfAborted();
+          if (!missingSource(error)) throw error;
+          warnings.push(`${file}: memory file is no longer available; skipped.`);
         }
       }
-      finish(); // Older exports may omit explicit final markers; retain only the last text reply.
-    } catch (error) {
+    }
+    return { conversations: byRecent(conversations), warnings };
+  },
+  async entries(c, signal) {
+    let content: string, modified: Date;
+    try { [content, { mtime: modified }] = await Promise.all([readFile(c.file, { encoding: 'utf8', signal }), stat(c.file)]); } catch (error) {
       signal?.throwIfAborted();
       if (!missingSource(error)) throw error;
-      // Do not stage a partial conversation if the source becomes unavailable mid-read.
-      return { entries: [], warnings: [...warnings, missingWarning(c.file)] };
+      return { entries: [], warnings: [`${c.file}: memory file is no longer available; skipped.`] };
     }
+    const { fields, body } = frontmatter(content);
+    if (!body.trim()) return { entries: [], warnings: [] };
+    const one = (s: string) => s.replace(/\s+/g, ' ').trim();
+    const name = one(fields.get('name') ?? c.title), type = fields.get('type'), description = fields.get('description');
+    // The whole file is the identity, so an edited memory arrives as a newer note and an unchanged one is skipped.
+    const hash = digest(content);
+    // Date the note from this read, not the earlier scan, in case Claude edited the file meanwhile.
+    const date = timestamp(fields.get('modified'), modified.toISOString());
+    return { warnings: [], entries: [{ kind: 'note', date,
+      origin: { source: c.source, conversation: c.id, message: hash.slice(0, 16), title: name, project: c.project },
+      text: `[Historical Claude Code memory · ${minute(date)} · project ${c.project}${type ? ` · type ${one(type)}` : ''} · ${name}]\n${description ? one(description) + '\n\n' : ''}${body.trim()}`,
+      receipt: `import:${digest(JSON.stringify([c.source, c.id, hash]))}` }] };
+  },
+};
+/** Claude names project folders after the launch directory with every other character replaced by '-'. Recover it from a transcript. */
+async function claudeProject(folder: string, name: string, signal?: AbortSignal): Promise<string> {
+  const transcripts = (await readdir(folder)).filter(f => f.endsWith('.jsonl')).sort();
+  for (const transcript of transcripts) {
+    try {
+      for await (const { value } of jsonLines(join(folder, transcript), [], 60, signal)) {
+        const cwd = string(value.cwd);
+        if (cwd && cwd.replace(/[^a-zA-Z0-9]/g, '-') === name) return cwd;
+      }
+    } catch (error) { signal?.throwIfAborted(); if (!missingSource(error)) throw error; }
   }
-  const unique = new Map(entries.map(e => [e.receipt, e]));
-  return { entries: [...unique.values()], warnings };
+  return name; // Transcripts can be cleaned up while memory remains.
+}
+function frontmatter(content: string) {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(content);
+  const fields = new Map<string, string>();
+  for (const line of match ? match[1].split(/\r?\n/) : []) {
+    // Newer files nest type/modified under `metadata:`; the first occurrence of each key wins.
+    const m = /^\s*([A-Za-z]+):\s*(.+?)\s*$/.exec(line);
+    if (m && !fields.has(m[1])) fields.set(m[1], unquote(m[2]));
+  }
+  return { fields, body: match ? content.slice(match[0].length) : content };
+}
+function unquote(value: string): string {
+  if (value.startsWith('"')) { try { const parsed: unknown = JSON.parse(value); if (typeof parsed === 'string') return parsed; } catch { /* plain text */ } }
+  if (/^'.*'$/.test(value)) return value.slice(1, -1).replaceAll("''", "'");
+  return value;
+}
+
+export const adapters = { claude, 'claude-memory': claudeMemory, codex, chatgpt } satisfies Record<Source, Adapter>;
+export const sources = Object.keys(adapters).filter((key): key is Source => key in adapters);
+export async function readConversation(c: Conversation, signal?: AbortSignal): Promise<Read> {
+  signal?.throwIfAborted();
+  const { entries, warnings } = await adapters[c.source].entries(c, signal);
+  return { entries: [...new Map(entries.map(e => [e.receipt, e])).values()], warnings };
 }

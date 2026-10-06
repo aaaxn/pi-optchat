@@ -8,7 +8,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { Memory, localDay, type Compressor } from '../src/memory.ts';
-import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
+import { adapters, readConversation, timestamp, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
 import { prepareImport, runImport, memoryDirectory, pendingImport, discardImport, deduplicate, chronological } from '../src/import/job.ts';
 import { chooseImport, showProgress } from '../src/import/ui.ts';
 
@@ -70,7 +70,7 @@ test('Claude slash commands keep only typed arguments, local command output is d
     // The receipt hashes the raw command, so a command imported before this filter is still recognized.
     const raw = '<command-message>oreo-mode</command-message>\n<command-name>/oreo-mode</command-name>\n<command-args>ship the parser fix</command-args>';
     assert.equal(parsed.entries[1].receipt, `import:${createHash('sha256').update(JSON.stringify(['claude', source.id, 'skill', 'user', raw])).digest('hex')}`);
-    const scan = await scanLocal('claude', [dir]);
+    const scan = await adapters.claude.scan(dir);
     assert.equal(scan.conversations[0].title, '!git status', 'a bare command never becomes the title');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -166,7 +166,7 @@ test('Codex discovery and parsing exclude delegated sessions while keeping user 
   lines(parent, [metadata('cli'), request]);
   lines(child, [metadata({ subagent: { thread_spawn: { parent_thread_id: 'session' } } }), request]);
   try {
-    const scan = await scanLocal('codex', [dir]);
+    const scan = await adapters.codex.scan(dir);
     assert.deepEqual(scan.conversations.map(c => c.file), [parent]);
     assert.equal((await readConversation(conversation('codex', child))).entries.length, 0);
     assert.equal((await readConversation(scan.conversations[0])).entries.length, 1);
@@ -186,7 +186,7 @@ test('ChatGPT keeps user messages and final replies on each branch with stable i
   } };
   writeFileSync(file, JSON.stringify([exported]));
   try {
-    const scan = await scanChatGPT(dir); assert.equal(scan.conversations.length, 1);
+    const scan = await adapters.chatgpt.scan(dir); assert.equal(scan.conversations.length, 1);
     const parsed = await readConversation(scan.conversations[0]);
     const msgs = parsed.entries.filter(e => e.origin?.message !== 'export:selected-branch');
     assert.deepEqual(msgs.map(e => e.origin?.message), ['u', 'f', 'alt']);
@@ -214,7 +214,7 @@ test('Claude discovery keeps the parent conversation and skips modern, legacy, a
   lines(join(workflow, 'journal.jsonl'), [{ type: 'started', agentId: 'a' }, { type: 'result', result: 'workflow metadata' }]);
   lines(join(workflow, 'conversation.jsonl'), [user]);
   try {
-    const scan = await scanLocal('claude', [dir]);
+    const scan = await adapters.claude.scan(dir);
     assert.deepEqual(scan.conversations.map(c => c.id), ['shared']);
     assert.deepEqual(scan.conversations.map(c => c.file), [parent]);
     assert.ok(scan.conversations.every(c => c.project === '/project' && c.date === date));
@@ -222,7 +222,7 @@ test('Claude discovery keeps the parent conversation and skips modern, legacy, a
     assert.equal(parsed.entries.length, 2);
     assert.match(parsed.entries[1].text, /Child reported useful findings/);
     assert.deepEqual(scan.warnings, []);
-    await assert.rejects(scanLocal('claude', [dir], AbortSignal.abort()));
+    await assert.rejects(adapters.claude.scan(dir, AbortSignal.abort()));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -233,7 +233,7 @@ test('Claude discovery checks late sidechain markers without extending metadata 
   lines(parent, [user, ...metadata.slice(1), { type: 'custom-title', sessionId: 'later', cwd: '/later', customTitle: 'Later title' }]);
   lines(child, [...metadata, { ...user, isSidechain: true }]);
   try {
-    const scan = await scanLocal('claude', [dir]);
+    const scan = await adapters.claude.scan(dir);
     assert.deepEqual(scan.conversations.map(c => c.file), [parent]);
     const { id, project, title, date: foundDate } = scan.conversations[0];
     assert.deepEqual({ id, project, title, date: foundDate }, { id: 'parent', project: '/project', title: 'Parent request', date });
@@ -244,7 +244,7 @@ test('Claude discovery checks late sidechain markers without extending metadata 
     writeFileSync(parent, [JSON.stringify({ type: 'session_meta', payload: { id: 'codex-parent', cwd: '/project', source: 'cli', timestamp: date } }),
       ...metadata.slice(1).map(value => JSON.stringify(value)), 'not JSON'].join('\n') + '\n');
     rmSync(child);
-    const codex = await scanLocal('codex', [dir]);
+    const codex = await adapters.codex.scan(dir);
     assert.deepEqual(codex.conversations.map(c => c.id), ['codex-parent']);
     assert.deepEqual(codex.warnings, []);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -261,7 +261,7 @@ test('discovery continues when listed files disappear before stat or stream open
   });
   syncBuiltinESMExports();
   try {
-    const scan = await scanLocal('claude', [dir]);
+    const scan = await adapters.claude.scan(dir);
     assert.deepEqual(scan.conversations.map(c => c.file), [first]);
     assert.equal(scan.warnings.length, 2);
     assert.ok(scan.warnings.some(w => w.includes(beforeStat)));
@@ -274,7 +274,7 @@ test('a selected transcript disappearing warns without importing it; cancellatio
   const dir = temp(), file = join(dir, 'selected.jsonl');
   try {
     lines(file, [{ type: 'user', uuid: 'u', message: { role: 'user', content: 'selected conversation' } }]);
-    const scan = await scanLocal('claude', [dir]);
+    const scan = await adapters.claude.scan(dir);
     rmSync(file);
     for (const source of ['claude', 'codex'] as const) {
       const parsed = await readConversation({ ...scan.conversations[0], source });
@@ -295,7 +295,7 @@ test('ChatGPT ZIP reads numbered conversation files without extracting other arc
   } }]));
   try {
     execFileSync('zip', ['-q', zip, 'conversations_1.json'], { cwd: dir }); rmSync(file);
-    const scan = await scanChatGPT(zip); assert.equal(scan.conversations.length, 1);
+    const scan = await adapters.chatgpt.scan(zip); assert.equal(scan.conversations.length, 1);
     const parsed = await readConversation(scan.conversations[0]); assert.equal(parsed.entries.length, 1);
     assert.match(parsed.entries[0].text, /zip fixture message/); assert.equal(existsSync(file), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -313,7 +313,7 @@ test('Claude memories import each topic file once as a dated note, and an edited
   writeFileSync(pr, '---\nname: PR status\ndescription: Tracking PR\nmetadata:\n  type: project\n---\nPR #7023 is open.\n');
   utimesSync(pr, new Date(date), new Date(date));
   try {
-    const scan = await scanClaudeMemories(root);
+    const scan = await adapters['claude-memory'].scan(root);
     assert.deepEqual(scan.warnings, []);
     const read = async () => (await Promise.all(scan.conversations.map(c => readConversation(c)))).flatMap(p => p.entries);
     const first = await read();
