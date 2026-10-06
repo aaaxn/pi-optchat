@@ -1,4 +1,5 @@
 import './support.ts';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
@@ -43,8 +44,10 @@ interface ChildrenOptions {
   createSession?: typeof createAgentSession;
 }
 
-export function makeChildren({ memory, runtime, dir, choice = { provider: PROVIDER, model: MODEL, thinking: 'minimal' }, instructions = '',
+export function makeChildren({ memory, runtime, dir, choice = { provider: PROVIDER, model: MODEL, thinking: 'minimal' }, instructions,
   report = async () => {}, warn = () => {}, parentSession, usage, builtins, createSession }: ChildrenOptions) {
-  return new Children(memory, new ModelRegistry(runtime), () => choice, () => instructions, report, warn, dir,
+  mkdirSync(dir, { recursive: true });
+  if (instructions !== undefined || !existsSync(join(dir, 'AGENTS.md'))) writeFileSync(join(dir, 'AGENTS.md'), instructions ?? '');
+  return new Children(memory, new ModelRegistry(runtime), () => choice, report, warn, dir,
     { parentSession, usage, builtins, createSession: createSession ?? (options => createAgentSession({ ...options, modelRuntime: runtime })) });
 }

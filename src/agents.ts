@@ -12,6 +12,7 @@ import { memoryTools, result } from './tools.ts';
 import { type Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
 import { cacheFor } from './cache.ts';
+import { agentInstructions } from './profiles.ts';
 import { deliverGuidance, RunHistory, sessionMessages, transition, undeliverGuidance, type RunInfo } from './runs.ts';
 import { UsageLedger } from './usage.ts';
 import { textContent } from './transcript.ts';
@@ -65,7 +66,7 @@ export class Children {
   private readonly launches = new Set<Promise<unknown>>();
   private readonly completions = new Set<Promise<void>>();
   constructor(private readonly memory: Memory, private readonly registry: ModelRegistry,
-    private readonly choice: () => ModelChoice, private readonly instructions: () => string,
+    private readonly choice: () => ModelChoice,
     private readonly report: (text: string) => Promise<void>, private readonly warn: (text: string) => void,
     private readonly profileDirectory = memory.directory, private readonly options: Options = {}) {
     this.history = new RunHistory(profileDirectory);
@@ -176,7 +177,7 @@ export class Children {
   }
   /** Builds a child session with the same prompt, tools and extensions whether it is new or resumed. */
   private async open(o: { id: string; directory: string; provider: string; model: Model<Api>; thinking?: ModelChoice['thinking']; sessionManager: SessionManager }) {
-    const instructions = `${this.instructions()}\n\nUse tell_parent only when the main agent needs something now (a blocking question, an important early finding, or when asked to). Your final answer is delivered automatically; do not repeat it with tell_parent.`;
+    const instructions = `${agentInstructions(this.profileDirectory)}\n\nUse tell_parent only when the main agent needs something now (a blocking question, an important early finding, or when asked to). Your final answer is delivered automatically; do not repeat it with tell_parent.`;
     // The user's settings list their installed packages; a copy in memory keeps the child from writing them back.
     const settingsManager = SettingsManager.inMemory({ ...SettingsManager.create(o.directory, getAgentDir()).getSettings(), compaction: { enabled: false }, cacheWarming: 'off' });
     const loader = new DefaultResourceLoader({ cwd: o.directory, agentDir: getAgentDir(), settingsManager,

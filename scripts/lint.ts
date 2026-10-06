@@ -17,6 +17,8 @@ const lineOf = (sf: ts.SourceFile, pos: number) => sf.getLineAndCharacterOfPosit
 const emptyBlock = (node: ts.Node) => ts.isBlock(node) && node.statements.length === 0;
 
 const rules: Rule[] = [
+  { name: 'import-guidance-owner', exempt: /^(src\/(profiles|compactor)\.ts|test\/fork\.test\.ts)$/, message: 'Agent instructions come from agentInstructions() in src/profiles.ts.',
+    hit: node => ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && /(^|\/)guidance(\.ts)?$/.test(node.moduleSpecifier.text) },
   { name: 'recipe-literal', exempt: /^src\/(memory|prompts)\.ts$/, message: 'Recipe constant as a literal. Import CAP, NODE or VIEW from src/memory.ts.',
     hit: node => ts.isNumericLiteral(node) && [512, 128_000, 30_000].includes(Number(node.text.replaceAll('_', ''))) },
   { name: 'view-tag-owner', exempt: /^src\/(memory|prompts)\.ts$/, message: 'The view block is built only by Memory.render().',
