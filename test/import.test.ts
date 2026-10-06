@@ -61,14 +61,15 @@ test('Claude slash commands keep only typed arguments, local command output is d
     reply('a2', 'the docs'),
   ]);
   try {
-    const parsed = await readConversation(conversation('claude', file));
+    const source = { ...conversation('claude', file), id: 'cbcb64a5-871a-4179-a897-e3683852d011' };
+    const parsed = await readConversation(source);
     assert.deepEqual(parsed.entries.map(e => e.text.slice(e.text.indexOf(']\n') + 2)), ['!git status', '/oreo-mode ship the parser fix', 'shipped', 'what is next?', 'the docs']);
-    assert.equal(parsed.entries[0].text.split('\n')[0], '[Historical claude · 2026-01-02 12:00Z · Fixture]', 'no conversation id or seconds');
-    assert.equal(parsed.entries[0].origin?.conversation, 'conversation-1', 'the id stays in the structured origin');
+    assert.equal(parsed.entries[0].text.split('\n')[0], '[Historical claude · 2026-01-02 12:00Z · cbcb64a5-871a · Fixture]', 'a short id the agent can glob for, no seconds');
+    assert.equal(parsed.entries[0].origin?.conversation, source.id, 'the full id stays in the structured origin');
     assert.doesNotMatch(JSON.stringify(parsed.entries), /command-|bash-|Compacted|Unknown command|On branch/);
     // The receipt hashes the raw command, so a command imported before this filter is still recognized.
     const raw = '<command-message>oreo-mode</command-message>\n<command-name>/oreo-mode</command-name>\n<command-args>ship the parser fix</command-args>';
-    assert.equal(parsed.entries[1].receipt, `import:${createHash('sha256').update(JSON.stringify(['claude', 'conversation-1', 'skill', 'user', raw])).digest('hex')}`);
+    assert.equal(parsed.entries[1].receipt, `import:${createHash('sha256').update(JSON.stringify(['claude', source.id, 'skill', 'user', raw])).digest('hex')}`);
     const scan = await scanLocal('claude', [dir]);
     assert.equal(scan.conversations[0].title, '!git status', 'a bare command never becomes the title');
   } finally { rmSync(dir, { recursive: true, force: true }); }
