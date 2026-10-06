@@ -106,7 +106,9 @@ Set a different shortcut with `OPTCHAT_INSPECT_KEY=ctrl+shift+a pi`. If another 
 
 Guidance shows as queued until delivered, or undelivered if the child stops first. Guidance you send is also saved in main memory. Reasoning is not shown. Transcripts stay browsable after restart, and browsing them makes no model calls.
 
-**Usage** shows this session, last hour, today, last 7 days, or all time (**Left/Right**). It breaks down main agent, subagents, compactor, and imports by model: uncached input, output, cache reads/writes, and estimated cost.
+**Usage** shows this session, last hour, today, last 7 days, or all time (**Left/Right**): one row per role and model (main agent, subagents, compactor, imports) with estimated cost, share of the total, output tokens, and how much input came from the cache. Costs are API prices, not your subscription bill.
+
+![Usage page](docs/screenshots/usage.png)
 
 - Costs are API-rate estimates, not your subscription bill. Unknown rates show zero.
 - Record counts are not request counts; retries and tool overhead can add records.
@@ -173,7 +175,7 @@ To delete a profile, delete its folder. Your original Pi sessions are kept in Pi
 
 ## How it differs from the recipe
 
-The recipe's four prompts are kept verbatim in `src/prompts.ts`, along with its numbers: 512-byte summary nodes, a 128,000-byte memory view, binary merges, 8 compression workers, fixed retry delays, 5 shortening attempts, and a 30,000-character tool output cap. Anthropic requests get stable cache breakpoints on the view. See `docs/victor-recipe.md` for notes.
+The recipe's four prompts are kept verbatim in `src/prompts.ts`, along with its numbers: 512-byte summary nodes, a 128,000-byte memory view, binary merges, 8 compression workers, fixed retry delays, 5 shortening attempts, and a 30,000-character tool output cap. Anthropic requests get stable cache breakpoints on the view, and when that view is not cached yet, one compactor call goes first and the others wait until it starts answering, so they read the cache instead of each writing it. See `docs/victor-recipe.md` for notes.
 
 Each run's context is the memory view and your new message, as the recipe prescribes; earlier exchanges appear only as summaries, and the agent zooms when it needs their exact wording. Deliberate additions:
 

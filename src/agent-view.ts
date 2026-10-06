@@ -3,7 +3,7 @@ import {
   createBashToolDefinition, createEditToolDefinition, createFindToolDefinition, createGrepToolDefinition, createLsToolDefinition, createReadToolDefinition, createWriteToolDefinition,
   type ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
-import { Editor, Spacer, matchesKey, truncateToWidth, visibleWidth, type Component, type Focusable, type TUI, type TuiMouseEvent, type TuiMouseEventResult } from '@earendil-works/pi-tui';
+import { Editor, Spacer, compositeTuiLine, matchesKey, truncateToWidth, visibleWidth, type Component, type Focusable, type TUI, type TuiMouseEvent, type TuiMouseEventResult } from '@earendil-works/pi-tui';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Children } from './agents.ts';
 import type { RunInfo } from './runs.ts';
@@ -287,10 +287,27 @@ export class AgentView implements Component, Focusable {
   }
 }
 
+/**
+ * Pi never composites overlays onto rows holding a terminal image (earendil-works/pi#6995), so images in the
+ * main chat would show through the full-screen view. While it is open, image rows under overlays are blanked.
+ * If Pi renames the hook, this quietly does nothing.
+ */
+export function hideImagesUnderOverlays(tui: TUI) {
+  Object.assign(tui, { compositeLineAt: (...[base, ...rest]: Parameters<typeof compositeTuiLine>) =>
+    compositeTuiLine(/\x1b_G|\x1b\]1337;File=/.test(base) ? '' : base, ...rest) });
+  return () => { Reflect.deleteProperty(tui, 'compositeLineAt'); };
+}
+
 /** Swaps the whole screen to the subagent's conversation; Pi restores the main chat on close. */
-export function showAgentView(ctx: ExtensionContext, options: { id: string; children: Children; signal?: AbortSignal }) {
-  return ctx.ui.custom<void>((tui, theme, keybindings, done) => new AgentView({ ...options, tui,
-    rows: () => tui.terminal.rows, redraw: () => tui.requestRender(), done: () => done(undefined),
-    color: (tone, text) => theme.fg(tone, text), isExpandKey: data => keybindings.matches(data, 'app.tools.expand'),
-  }), { overlay: true, overlayOptions: { width: '100%', maxHeight: '100%', row: 0, col: 0 } });
+export async function showAgentView(ctx: ExtensionContext, options: { id: string; children: Children; signal?: AbortSignal }) {
+  let restore = () => {};
+  try {
+    return await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
+      restore = hideImagesUnderOverlays(tui);
+      return new AgentView({ ...options, tui,
+        rows: () => tui.terminal.rows, redraw: () => tui.requestRender(), done: () => done(undefined),
+        color: (tone, text) => theme.fg(tone, text), isExpandKey: data => keybindings.matches(data, 'app.tools.expand'),
+      });
+    }, { overlay: true, overlayOptions: { width: '100%', maxHeight: '100%', row: 0, col: 0 } });
+  } finally { restore(); }
 }

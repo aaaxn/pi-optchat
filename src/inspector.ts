@@ -2,11 +2,23 @@ import { matchesKey, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithA
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { Children } from './agents.ts';
 import { isActiveRun } from './runs.ts';
-import { ranges, summarizeUsage, type UsageLedger, type UsageRange } from './usage.ts';
+import type { Usage } from '@earendil-works/pi-ai';
+import { ranges, summarizeUsage, type UsageLedger, type UsageRange, type UsageRole } from './usage.ts';
 
 export const clean = (text: string) => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '').replace(/\t/g, '  ');
 export const oneLine = (text: string) => clean(text).replace(/\n/g, ' ');
 export const count = (n: number) => n.toLocaleString('en-US');
+const units = ['', 'k', 'M', 'B'];
+/** 950, 12.3k, 164k, 2.4M: enough precision to compare rows at a glance. A value that rounds to 1000 moves up a unit. */
+export const short = (n: number) => {
+  let unit = 0, value = n;
+  const round = (v: number) => v >= 100 || !unit ? Math.round(v) : Number(v.toFixed(1));
+  while (unit < units.length - 1 && round(value) >= 1000) { value /= 1000; unit++; }
+  return `${round(value)}${units[unit]}`;
+};
+const dollars = (n: number) => `$${n.toFixed(2)}`;
+const cached = (u: Usage) => { const input = u.input + u.cacheRead + u.cacheWrite; return `${input ? Math.round(100 * u.cacheRead / input) : 0}%`; };
+const roleNames: Record<UsageRole, string> = { main: 'main', subagent: 'subagents', compactor: 'compactor', import: 'import' };
 export const elapsed = (ms: number) => ms < 60_000 ? `${Math.max(0, Math.floor(ms / 1000))}s` : `${Math.floor(ms / 60_000)}m ${Math.floor(ms / 1000) % 60}s`;
 /** Shortens plain text with an ellipsis, preferring a word boundary. */
 export function fit(text: string, width: number) {
@@ -23,7 +35,7 @@ const spread = (left: string, right: string, width: number) => {
 export type InspectorPage = 'agents' | 'usage';
 /** Closing the panel either picks the subagent model or opens one agent's conversation. */
 export type InspectorAction = 'model' | { open: string };
-type Tone = 'accent' | 'muted' | 'dim' | 'error' | 'border';
+type Tone = 'accent' | 'muted' | 'dim' | 'error' | 'warning' | 'border';
 interface Options {
   profile: string; session: string; children: Children; usage: UsageLedger; page: InspectorPage;
   rows: () => number; redraw: () => void; done: (action?: InspectorAction) => void;
@@ -96,24 +108,34 @@ export class Inspector implements Component, Focusable {
       this.scroll = Math.max(0, Math.min(this.scroll, this.lineCount - this.height));
     }
   }
-  private usageLines() {
-    const { usage, session, context } = this.options;
+  /** Period tabs, one headline, then an aligned table with a row per role and model. */
+  private usageLines(width: number) {
+    const { usage, session, context, color } = this.options;
     const entries = usage.select(this.range, session);
     const { total, groups } = summarizeUsage(entries);
-    const input = total.input + total.cacheRead + total.cacheWrite;
-    const lines = [`← → period: ${this.range}`, '', `Total processed: ${count(total.totalTokens)} tokens · ${entries.length} usage records`,
-      `Input: ${count(input)} · Output: ${count(total.output)}`,
-      `Cache read: ${count(total.cacheRead)} · Cache write: ${count(total.cacheWrite)} · Hit rate: ${input ? (100 * total.cacheRead / input).toFixed(1) : '0'}%`,
-      `Estimated API-equivalent cost: $${total.cost.total.toFixed(4)}`, '',
-      'ROLE / MODEL — input · output · cache read/write · estimated cost'];
-    for (const g of groups) lines.push(`${g.role} / ${g.model}\n  ${count(g.usage.input)} uncached input · ${count(g.usage.output)} out · ${count(g.usage.cacheRead)}/${count(g.usage.cacheWrite)} cache · $${g.usage.cost.total.toFixed(4)} · ${g.requests} records`);
+    // No-break spaces keep a label like "Last 7 days" on one line when the tabs wrap.
+    const tabs = ranges.map(r => r.replaceAll(' ', '\u00a0')).map((r, i) => ranges[i] === this.range ? color('accent', `[${r}]`) : color('dim', r)).join('  ');
+    const lines = [...wrapTextWithAnsi(tabs, width), ''];
+    if (!entries.length) lines.push(color('muted', 'No usage in this period.'));
+    else {
+      lines.push(`${color('accent', dollars(total.cost.total))} estimated · ${short(total.totalTokens)} tokens · ${cached(total)} cached`, '');
+      const order = ['main', 'subagent', 'compactor', 'import'] as const;
+      const sorted = groups.sort((a, b) => order.indexOf(a.role) - order.indexOf(b.role) || b.usage.cost.total - a.usage.cost.total);
+      const rows = sorted.map((g, i) => [i && sorted[i - 1].role === g.role ? '' : roleNames[g.role], oneLine(g.model), dollars(g.usage.cost.total),
+        `${total.cost.total ? Math.round(100 * g.usage.cost.total / total.cost.total) : 0}%`, short(g.usage.output), cached(g.usage)]);
+      const header = ['', 'model', 'cost', 'share', 'out', 'cached'];
+      const widths = header.map((h, c) => Math.max(h.length, ...rows.map(r => r[c].length)));
+      // The model column goes first when the screen is too narrow for every column.
+      const columns = widths.reduce((sum, w) => sum + w + 2, 0) - 2 <= width ? [0, 1, 2, 3, 4, 5] : [0, 2, 3, 4, 5];
+      const line = (cells: string[]) => columns.map(c => c < 2 ? cells[c].padEnd(widths[c]) : cells[c].padStart(widths[c])).join('  ').trimEnd();
+      lines.push(color('dim', line(header)), ...rows.map(r => {
+        const text = line(r); return color('muted', text.slice(0, widths[0])) + text.slice(widths[0]);
+      }));
+    }
     const current = context();
-    lines.push('', `Current parent context (Pi estimate): ${current == null ? 'unavailable' : `${count(current)} tokens`} — separate from cumulative usage.`,
-      'Costs use model API rates when available; not your subscription bill or remaining allowance.',
-      'Usage updates when responses finish. Tool overhead may be a usage record without a request count.',
-      'Main tracking starts with this version; the resumed parent session and saved children are backfilled.',
-      'Older compactor/child records without a parent session appear only in date-based totals.', ...usage.warnings);
-    return lines.join('\n');
+    if (current != null) lines.push('', `${color('muted', 'Context now')} ${short(current)} tokens`);
+    lines.push('', color('dim', 'Estimated at API prices, not your subscription bill.'), ...usage.warnings.map(w => color('warning', w)));
+    return lines.flatMap(l => l ? wrapTextWithAnsi(l, width) : ['']);
   }
   render(width: number): string[] {
     const { color, children, profile } = this.options;
@@ -121,11 +143,11 @@ export class Inspector implements Component, Focusable {
     let title = `OptChat · ${profile} · ${this.page === 'usage' ? 'Usage' : 'Agents'}`;
     let info: string, body: string[], hint: string;
     if (this.page === 'usage') {
-      const lines = wrapTextWithAnsi(clean(this.usageLines()), inner); this.lineCount = lines.length;
+      const lines = this.usageLines(inner); this.lineCount = lines.length;
       this.scroll = Math.max(0, Math.min(this.scroll, lines.length - this.height));
       body = lines.slice(this.scroll, this.scroll + this.height);
       info = `${this.scroll + 1}–${Math.min(this.scroll + this.height, lines.length)} / ${lines.length}`;
-      hint = '←→ period · ↑↓/PgUp/PgDn scroll · Tab agents · Esc close';
+      hint = '←→ period · ↑↓ scroll · Tab agents · Esc close';
     } else {
       const list = children.history.list();
       if (!this.selected) this.selected = list[0]?.id;
