@@ -18,6 +18,7 @@ test('memory browser embeds escaped data and a script that compiles', async () =
     assert.ok(json && !json.includes('<'));
     const data: unknown = JSON.parse(json);
     assert.ok(typeof data === 'object' && data !== null && 'root' in data && Array.isArray(data.root));
+    assert.deepEqual('sources' in data && data.sources, { claude: 'Claude Code', 'claude-memory': 'Claude Code memory', codex: 'Codex', chatgpt: 'ChatGPT' }, 'every import source has a label from its adapter');
     assert.equal(data.root[0].text, 'Hello </script><img src=x onerror=alert(1)> $& $1');
     const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
     assert.equal(scripts.length, 1);

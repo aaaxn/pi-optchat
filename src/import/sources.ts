@@ -19,6 +19,8 @@ export interface Scan { conversations: Conversation[]; warnings: string[] }
 export interface Read { entries: ImportedEntry[]; warnings: string[] }
 export interface Adapter {
   label: string;
+  /** What the memory browser calls this source in "imported from ...". */
+  browserLabel: string;
   words: { plural: string; singular: string; item: string; preview: string };
   byProject: boolean;
   input?: string;
@@ -174,6 +176,7 @@ async function readTranscript(c: Conversation, signal: AbortSignal | undefined, 
 const claudeScaffold = (content: unknown) => { const typed = text(content); return claudeCommand(typed) ?? typed; };
 const claude: Adapter = {
   label: 'Claude Code',
+  browserLabel: 'Claude Code',
   words: { plural: 'Conversations', singular: 'Conversation', item: 'messages', preview: 'Historical user messages and final replies; tool activity excluded.' },
   byProject: true,
   scaffold: claudeScaffold,
@@ -231,6 +234,7 @@ const claude: Adapter = {
 const codexScaffold = (content: unknown) => (Array.isArray(content) ? content : [content]).map(text).filter(piece => piece && !codexContext.some(re => re.test(piece.trim()))).join('\n');
 const codex: Adapter = {
   label: 'Codex',
+  browserLabel: 'Codex',
   words: claude.words,
   byProject: true,
   scaffold: codexScaffold,
@@ -271,6 +275,7 @@ const codex: Adapter = {
 
 const chatgpt: Adapter = {
   label: 'ChatGPT export',
+  browserLabel: 'ChatGPT',
   words: claude.words,
   byProject: false,
   input: 'ChatGPT export ZIP, extracted folder, or conversations JSON path',
@@ -376,6 +381,7 @@ const chatgpt: Adapter = {
 /** Claude Code auto memory: one note per topic file. MEMORY.md is only an index of those files. */
 const claudeMemory: Adapter = {
   label: 'Claude Code memories',
+  browserLabel: 'Claude Code memory',
   words: { plural: 'Memories', singular: 'Memory', item: 'notes', preview: 'Each memory file as one dated historical note; MEMORY.md indexes excluded.' },
   byProject: true,
   scaffold: text,
