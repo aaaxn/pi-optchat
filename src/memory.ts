@@ -30,7 +30,7 @@ export function cap(text: string, limit = CAP) {
 export function localDay(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
-/** With `size`, refuses to append unless the file still has the size this process last saw, so a second writer is caught before it corrupts the log. Returns the new size. */
+/** With `size`, refuses to append unless the file still has that size. Returns the new size. */
 export function appendJson(file: string, value: unknown, size?: number) {
   const fd = openSync(file, 'a', 0o600);
   try {
@@ -82,8 +82,7 @@ export class Memory {
   private readonly busy = new Map<number, Promise<void>>();
   private readonly retryAt = new Map<number, number>();
   private readonly reported = new Set<number>();
-  /** Bytes of each main log file as this process last saw them. */
-  private readonly sizes = new Map<string, number>();
+  private readonly lastSeenBytes = new Map<string, number>();
   private viewBytes = 0;
   private leaves = 0;
   /** Per level, every node below this index is built. */
@@ -98,7 +97,7 @@ export class Memory {
     readonly budget = VIEW, private readonly jobs = 8, private readonly retryMs = 10_000) {
     for (const sub of ['main', 'tree']) mkdirSync(join(directory, sub), { recursive: true, mode: 0o700 });
     const main = join(directory, 'main'), log = records(main, warn);
-    for (const name of readdirSync(main).filter(n => n.endsWith('.jsonl'))) this.sizes.set(join(main, name), statSync(join(main, name)).size);
+    for (const name of readdirSync(main).filter(n => n.endsWith('.jsonl'))) this.lastSeenBytes.set(join(main, name), statSync(join(main, name)).size);
     for (const value of log) {
       if (!isEntry(value) || value.i !== this.root.length) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
       this.root.push({ ...value, size: bytes(`${value.kind}: ${value.text}`) });
@@ -117,7 +116,7 @@ export class Memory {
     if (this.stopped) throw new Error('Memory is closed.');
     const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}) };
     const file = join(this.directory, 'main', `${localDay()}.jsonl`);
-    this.sizes.set(file, appendJson(file, entry, this.sizes.get(file) ?? 0));
+    this.lastSeenBytes.set(file, appendJson(file, entry, this.lastSeenBytes.get(file) ?? 0));
     this.root.push(entry); this.push(entry.i); this.fit(); this.schedule();
     return entry;
   }
