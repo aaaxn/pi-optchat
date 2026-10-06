@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CAP, NODE, VIEW, Memory, isView, appendJson, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
+import { CAP, NODE, VIEW, Memory, isView, appendJson, cap, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
 import { lockProfile } from '../src/profiles.ts';
 import { splitView, cachePayload, cacheFor } from '../src/cache.ts';
 import { SCALE } from '../src/compactor.ts';
@@ -442,4 +442,30 @@ test('a torn tail that another process wrote is refused, not repaired', async ()
     assert.throws(() => memory.append('user', 'second'), /Another process wrote .*nothing was written/);
     assert.equal(readFileSync(file, 'utf8'), before);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+const wellFormed = (text: string) => Buffer.from(text).toString() === text;
+const pieces = (out: string) => {
+  const notice = out.match(/\n\[(\d+) characters omitted; head and tail retained\]\n/)!;
+  return { claimed: Number(notice[1]), head: out.slice(0, notice.index), tail: out.slice(notice.index! + notice[0].length) };
+};
+
+test('cap states exactly how many characters it omitted and stays within the limit', () => {
+  assert.equal(cap('x'.repeat(CAP)), 'x'.repeat(CAP));
+  for (const text of ['x'.repeat(CAP + 1), 'x'.repeat(CAP + 49), 'x'.repeat(250_000)]) {
+    const out = cap(text), { claimed, head, tail } = pieces(out);
+    assert.ok(out.length <= CAP, `${out.length} units`);
+    assert.ok(text.startsWith(head) && text.endsWith(tail));
+    assert.equal(claimed, text.length - head.length - tail.length);
+  }
+});
+
+test('cap never cuts a surrogate pair in half', () => {
+  const emoji = '\u{1F600}'.repeat(CAP);
+  for (const text of ['a' + emoji, emoji, 'ab' + emoji, emoji + 'a']) {
+    const out = cap(text), { claimed, head, tail } = pieces(out);
+    assert.ok(wellFormed(out), `lone surrogate in the cap of a ${text.length} unit text`);
+    assert.ok(out.length <= CAP && text.startsWith(head) && text.endsWith(tail));
+    assert.equal(claimed, text.length - head.length - tail.length);
+  }
 });

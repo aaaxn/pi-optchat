@@ -21,11 +21,13 @@ const UNBUILT_BYTES = bytes(UNBUILT);
 export const flat = (s: string) => s.replace(/[\r\n]+/g, ' ');
 const VIEW_OPEN = '<chat>\n';
 export const isView = (text: string) => text.startsWith(VIEW_OPEN);
+const notice = (omitted: number) => `\n[${omitted} characters omitted; head and tail retained]\n`;
 export function cap(text: string, limit = CAP) {
   if (text.length <= limit) return text;
-  const notice = `\n[${text.length - limit} characters omitted; head and tail retained]\n`;
-  const half = Math.floor((limit - notice.length) / 2);
-  return text.slice(0, half) + notice + text.slice(-half);
+  const half = Math.floor((limit - notice(text.length).length) / 2);
+  const head = text.slice(0, /[\ud800-\udbff]/.test(text[half - 1]) ? half - 1 : half);
+  const tail = text.slice(/[\udc00-\udfff]/.test(text[text.length - half]) ? text.length - half + 1 : text.length - half);
+  return head + notice(text.length - head.length - tail.length) + tail;
 }
 export function localDay(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
