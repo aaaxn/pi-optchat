@@ -215,9 +215,7 @@ function frontmatter(content: string) {
   return { fields, body: match ? content.slice(match[0].length) : content };
 }
 function unquote(value: string): string {
-  if (value.startsWith('"')) {
-    try { const parsed: unknown = JSON.parse(value); if (typeof parsed === 'string') return parsed; } catch {} // why: not JSON, so the value is plain text.
-  }
+  if (value.startsWith('"')) { try { const parsed: unknown = JSON.parse(value); if (typeof parsed === 'string') return parsed; } catch { /* plain text */ } }
   if (/^'.*'$/.test(value)) return value.slice(1, -1).replaceAll("''", "'");
   return value;
 }

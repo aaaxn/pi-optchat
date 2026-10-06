@@ -90,7 +90,7 @@ export default function optchat(pi: ExtensionAPI) {
   };
   const stop = async () => {
     inspectorController?.abort(); unmountNavigation?.(); unmountNavigation = undefined;
-    stopping = true; importController?.abort(); await importTask?.catch(() => {}); // why: the import command that awaits importTask reports its failure.
+    stopping = true; importController?.abort(); await importTask?.catch(() => {});
     if (!active) return;
     const old = active;
     try {
@@ -182,7 +182,7 @@ export default function optchat(pi: ExtensionAPI) {
       }
       if (name !== boundName) pi.appendEntry(binding, { name });
     } catch (error) {
-      if (active) await stop().catch(() => {}); // why: the original error is reported below, and a failing stop must not replace it.
+      if (active) await stop().catch(() => {});
       fault = errorText(error); ctx.ui.notify(fault, 'error');
     }
     // Pi sets its own title once every session_start handler has finished, so put ours back afterwards.
