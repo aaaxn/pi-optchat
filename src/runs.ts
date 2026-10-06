@@ -22,7 +22,6 @@ const moves: Record<RunState, readonly RunState[]> = {
   running: ['stopping', 'completed', 'failed', 'stopped'], stopping: ['stopped', 'failed', 'completed'],
   completed: [], failed: [], stopped: [], interrupted: [],
 };
-/** The one way a live run changes state. A finished run never moves again, so a late stop cannot rewrite its result. */
 export function transition(run: RunInfo, to: RunState) {
   if (!moves[run.state].includes(to)) return false;
   run.state = to; return true;
