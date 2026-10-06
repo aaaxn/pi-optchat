@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Memory, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
+import { CAP, Memory, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
 import { lockProfile } from '../src/profiles.ts';
 import { splitView, cachePayload, cacheFor } from '../src/cache.ts';
 import { SCALE } from '../src/compactor.ts';
@@ -132,7 +132,7 @@ test('tool images survive active-context truncation while text is bounded', () =
   assert.equal(bounded.role, 'toolResult');
   if (bounded.role !== 'toolResult') throw new Error('unexpected role');
   assert.ok(bounded.content.includes(image));
-  assert.ok(bounded.content.filter(c => c.type === 'text').reduce((n, c) => n + c.text.length, 0) <= 30_000);
+  assert.ok(bounded.content.filter(c => c.type === 'text').reduce((n, c) => n + c.text.length, 0) <= CAP);
 });
 
 test('crash recovery saves unconsumed inputs once, including append-before-ack crash', async () => {
