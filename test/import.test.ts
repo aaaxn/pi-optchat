@@ -1,7 +1,7 @@
 import './support.ts';
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, utimesSync, copyFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, utimesSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import fs from 'node:fs';
@@ -386,10 +386,14 @@ test('discard leaves original memory active and a completed pointer swap can fin
     discardImport(dir); assert.equal(memoryDirectory(dir), dir); assert.equal(pendingImport(dir), undefined);
     const job = prepareImport(dir, old, [entry('keep')], 'append'); assert.ok(job);
     await runImport(dir, short, AbortSignal.timeout(5000));
-    // Simulate the durable pointer write succeeding immediately before journal removal crashed.
+    const staged = join(dir, job.target, 'staged.jsonl');
+    assert.ok(!existsSync(staged), 'an activated import keeps no second copy of its log');
+    // Simulate a crash right after the durable pointer write, before the staged plan and the journal were removed.
+    writeFileSync(staged, '');
     writeFileSync(join(dir, 'imports', 'pending.json'), JSON.stringify(job));
     await runImport(dir, short, AbortSignal.timeout(5000));
     assert.equal(pendingImport(dir), undefined);
+    assert.ok(!existsSync(staged));
     assert.equal(memoryDirectory(dir), join(dir, job.target));
     assert.ok(existsSync(join(dir, 'imports', `${job.id}.json`)));
   } finally { await old.close(); rmSync(dir, { recursive: true, force: true }); }
@@ -412,6 +416,19 @@ test('an import gives the compactor the same inputs as a live chat that sent the
     assert.ok(fromChat.some(call => call.startsWith('[true')), 'the view overflowed and merged');
     assert.deepEqual(fromImport.sort(), fromChat.sort());
   } finally { await chat?.close(); rmSync(dir, { recursive: true, force: true }); rmSync(live, { recursive: true, force: true }); }
+});
+
+test('a staged plan with an invalid entry is refused before anything is written', async () => {
+  const dir = temp(), old = new Memory(dir, short);
+  try {
+    old.append('user', 'original'); await old.settle(undefined, true); await old.close();
+    const job = prepareImport(dir, old, [entry('a'), entry('b')], 'append'); assert.ok(job);
+    const staged = join(dir, job.target, 'staged.jsonl');
+    writeFileSync(staged, readFileSync(staged, 'utf8').replace('"kind":"user","text":"Imported b"', '"kind":"bogus","text":"Imported b"'));
+    await assert.rejects(runImport(dir, short, AbortSignal.timeout(5000)), /invalid/);
+    assert.equal(memoryDirectory(dir), dir);
+    assert.deepEqual(readdirSync(join(dir, job.target, 'main')), ['000-import.jsonl']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('chronological rebuild keeps imported conversations and native turns together', () => {
