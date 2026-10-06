@@ -59,15 +59,19 @@ export function rememberProfile(name: string) { atomicWrite(join(dataHome(), 'la
 export class ProfileBusyError extends Error {
   constructor(readonly owner: string) { super(`Profile already running: ${owner}`); }
 }
+/** Unix socket paths are limited by sun_path: 104 bytes on macOS, 108 on Linux, each including the final NUL. */
+const SOCKET_PATH_MAX = 103;
 export function profileSocket(dir: string) {
   const hash = createHash('sha256').update(dir).digest('hex').slice(0, 24);
-  return join(tmpdir(), `pi-optchat-${process.getuid?.() ?? 'user'}-${hash}.sock`);
+  const path = join(tmpdir(), `pi-optchat-${process.getuid?.() ?? 'user'}-${hash}.sock`), length = Buffer.byteLength(path);
+  if (length > SOCKET_PATH_MAX) throw new Error(`Cannot lock the profile: its socket path is ${length} bytes and the limit is ${SOCKET_PATH_MAX}. Set TMPDIR to a shorter directory: ${path}`);
+  return path;
 }
 
 /** OS-owned socket lifetime, no timeout-based stealing of a busy profile. */
 export async function lockProfile(dir: string, description: string) {
   const socketPath = profileSocket(dir);
-  const server = createServer(socket => { socket.end(description); });
+  const server = createServer(socket => { socket.on('error', () => socket.destroy()); socket.end(description); });
   const listen = () => new Promise<void>((resolve, reject) => {
     const failed = (error: Error) => { server.off('listening', ready); reject(error); };
     const ready = () => { server.off('error', failed); resolve(); };

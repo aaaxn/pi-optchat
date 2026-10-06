@@ -1,17 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
-import { createProfile, loadConfig, lockProfile, profilePath, saveConfig } from '../src/profiles.ts';
+import { createProfile, loadConfig, lockProfile, profilePath, profileSocket, saveConfig } from '../src/profiles.ts';
 import { fakeProvider, fakeRuntime } from './fakes.ts';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: string, talked = false) {
-  const runtime = await fakeRuntime(dir, fakeProvider(undefined, { model: 'fixture' }), 'fixture');
+  const runtime = await fakeRuntime(dir, fakeProvider('Done.', { model: 'fixture' }), 'fixture');
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
   const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
     noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
@@ -75,5 +76,45 @@ test('a busy profile offers Back to pick another profile, and picking another op
     await unlock?.(); await sleep(50);
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a client that hangs up early does not crash the process holding the lock', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-lock-'));
+  const unlock = await lockProfile(dir, 'holder');
+  try {
+    const path = profileSocket(dir);
+    for (let round = 0; round < 20; round++) {
+      await Promise.all(Array.from({ length: 50 }, () => new Promise<void>(done => {
+        const client = createConnection(path);
+        client.on('error', () => done());
+        client.on('connect', () => { client.destroy(); done(); });
+      })));
+      await sleep(5);
+    }
+    await sleep(100);
+    await assert.rejects(lockProfile(dir, 'second'), /holder/);
+  } finally {
+    await unlock(); rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a socket path of 103 bytes locks, and a longer one names TMPDIR in the error', async () => {
+  const root = mkdtempSync('/tmp/oc.'), oldTmp = process.env.TMPDIR;
+  const under = (length: number) => {
+    process.env.TMPDIR = root;
+    const tmp = join(root, 'p'.repeat(length - Buffer.byteLength(profileSocket(root)) - 1));
+    mkdirSync(tmp); process.env.TMPDIR = tmp;
+  };
+  try {
+    under(103);
+    assert.equal(Buffer.byteLength(profileSocket(root)), 103);
+    const unlock = await lockProfile(root, 'holder'); await unlock();
+    under(104);
+    assert.throws(() => profileSocket(root), /104 bytes.*TMPDIR to a shorter/);
+    await assert.rejects(lockProfile(root, 'holder'), /TMPDIR to a shorter/);
+  } finally {
+    if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp;
+    rmSync(root, { recursive: true, force: true });
   }
 });
