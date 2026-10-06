@@ -8,7 +8,7 @@ import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type Extensi
 import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { createCompressor } from './compactor.ts';
-import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
+import { agentInstructions, atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
 import { MASTER, VIEW_DOC } from './prompts.ts';
 import { cacheFor, record } from './cache.ts';
 import { asUser, boundedMessage, buildContext, logMessage, REPORT_TYPE, textContent, typedText } from './transcript.ts';
@@ -20,7 +20,6 @@ import { Inbox } from './inbox.ts';
 import { checkpoint } from './checkpoint.ts';
 import { memoryDirectory, pendingImport, prepareImport, runImport, discardImport } from './import/job.ts';
 import { chooseImport, showProgress } from './import/ui.ts';
-import { IMPORT_GUIDANCE } from './import/guidance.ts';
 import { UsageLedger } from './usage.ts';
 import { showInspector, type InspectorPage } from './inspector.ts';
 import { showAgentView } from './agent-view.ts';
@@ -135,7 +134,7 @@ export default function optchat(pi: ExtensionAPI) {
       const inbox = new Inbox(dir);
       const recovered = pendingImport(dir) ? 0 : inbox.recover(memory);
       if (recovered) ctx.ui.notify(`Recovered ${recovered} unanswered inputs into ${name}'s memory. Ask to continue them when ready.`, 'info');
-      const children = new Children(memory, ctx.modelRegistry, () => config.subagent, () => `${instructions(dir)}\n\n${IMPORT_GUIDANCE}`,
+      const children = new Children(memory, ctx.modelRegistry, () => config.subagent,
         deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage, builtins: () => loadedBuiltins(pi) });
       const loggedReports = new Set(memory.root.map(e => e.receipt));
       reports = saved.filter((s): s is string => typeof s === 'string' && !loggedReports.has(reportReceipt(s)));
@@ -212,7 +211,7 @@ export default function optchat(pi: ExtensionAPI) {
     const a = required();
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
     event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}`;
-    event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
+    event.systemPromptOptions.sections.instructions = agentInstructions(a.dir);
     prompt = event.systemPrompt;
   });
   pi.on('message_end', (event, ctx) => {

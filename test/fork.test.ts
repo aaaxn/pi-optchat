@@ -4,10 +4,12 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { splitView } from '../src/cache.ts';
+import { IMPORT_GUIDANCE } from '../src/import/guidance.ts';
 import { CAP, Memory, NODE, VIEW } from '../src/memory.ts';
+import { createProfile, profilePath } from '../src/profiles.ts';
 import * as transcript from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
@@ -25,11 +27,14 @@ const design = (area: string) => {
   return `AGENTS.md "Keep the fork's design", row "${name}": do not take the upstream side (${upstream})`;
 };
 
-function load() {
-  const tools: { name: string; description: string }[] = [], commands: string[] = [];
+type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+
+function load(profile?: string) {
+  const tools: { name: string; description: string }[] = [], commands: string[] = [], handlers = new Map<string, Handler[]>();
   optchat({ registerTool: (tool: { name: string; description: string }) => tools.push(tool), registerCommand: (name: string) => commands.push(name),
-    registerFlag: () => {}, registerShortcut: () => {}, registerMessageRenderer: () => {}, on: () => {} } as unknown as ExtensionAPI);
-  return { tools, commands };
+    registerFlag: () => {}, registerShortcut: () => {}, registerMessageRenderer: () => {}, getFlag: () => profile, appendEntry: () => {},
+    on: (name: string, handler: Handler) => handlers.set(name, [...handlers.get(name) ?? [], handler]) } as unknown as ExtensionAPI);
+  return { tools, commands, handlers };
 }
 
 test('spawn never allows subagents to delegate', () => {
@@ -77,4 +82,36 @@ test('AGENTS.md states the cache marks where splitView cuts the view', () => {
   const view = '123456789\n'.repeat((marks.at(-1) ?? 0) / 10 + 1000);
   const cuts = splitView(view).slice(0, -1).reduce<number[]>((at, piece) => [...at, (at.at(-1) ?? 0) + piece.length], []);
   assert.deepEqual(cuts, marks, 'AGENTS.md "Follow the recipe" constants table: cache marks');
+});
+
+test('the main agent and a subagent both get the profile instructions followed by IMPORT_GUIDANCE', async () => {
+  createProfile('fork');
+  const profile = profilePath('fork');
+  const composed = `${readFileSync(join(profile, 'AGENTS.md'), 'utf8')}\n\n${IMPORT_GUIDANCE}`;
+  const { handlers } = load('fork');
+  const fire = async (name: string, event: unknown, ctx: ExtensionContext) => { for (const handler of handlers.get(name) ?? []) await handler(event, ctx); };
+  const ctx = { mode: 'print', hasUI: false, cwd: profile, ui: { notify: () => {}, setStatus: () => {}, setTitle: () => {} },
+    sessionManager: { getEntries: () => [], getSessionId: () => 'fork-test' }, modelRegistry: {} } as unknown as ExtensionContext;
+  await fire('session_start', { type: 'session_start' }, ctx);
+  try {
+    const event = { systemPromptOptions: { sections: {} as Record<string, string> }, systemPrompt: '' };
+    await fire('before_agent_start', event, ctx);
+    assert.equal(event.systemPromptOptions.sections.instructions, composed, 'the main agent gets the profile instructions, then IMPORT_GUIDANCE');
+  } finally { await fire('session_shutdown', { type: 'session_shutdown' }, ctx); }
+
+  let system = '';
+  const runtime = await fakeRuntime(profile, fakeProvider((model, context) => {
+    const head = context.messages.find(m => m.role === 'system');
+    system = Object.values(head && 'sections' in head ? head.sections ?? {} : {}).join('\n');
+    return fakeProvider('done').streamSimple!(model, context);
+  }));
+  const memory = new Memory(profile, async input => input.source.slice(0, 100), () => {});
+  let reported!: () => void;
+  const done = new Promise<void>(resolve => { reported = resolve; });
+  const children = makeChildren({ memory, runtime, dir: profile, report: async () => reported() });
+  try {
+    await children.spawn([{ task: 'report' }], profile);
+    await done;
+    assert.ok(system.includes(composed), 'a subagent gets the same instructions and IMPORT_GUIDANCE as the main agent');
+  } finally { await children.close(); await memory.close(); }
 });

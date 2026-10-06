@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { ModelChoice } from './compactor.ts';
 import { record } from './cache.ts';
+import { IMPORT_GUIDANCE } from './import/guidance.ts';
 
 export const dataHome = () => resolve(process.env.OPTCHAT_HOME ?? join(homedir(), '.optchat'));
 export interface ProfileConfig { compactor: ModelChoice; subagent: ModelChoice }
@@ -48,6 +49,7 @@ export function loadConfig(dir: string): ProfileConfig {
   return { compactor: value.compactor, subagent: value.subagent };
 }
 export function instructions(dir: string) { return readFileSync(join(dir, 'AGENTS.md'), 'utf8'); }
+export const agentInstructions = (dir: string) => `${instructions(dir)}\n\n${IMPORT_GUIDANCE}`;
 export function lastProfile() {
   try { const name = readFileSync(join(dataHome(), 'last-profile'), 'utf8').trim(); return listProfiles().includes(name) ? name : undefined; }
   catch { return undefined; }
