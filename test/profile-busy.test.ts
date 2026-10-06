@@ -1,24 +1,17 @@
-import { after, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, lockProfile, profilePath, saveConfig } from '../src/profiles.ts';
+import { fakeProvider, fakeRuntime } from './fakes.ts';
 
-const agentDir = process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
-after(() => rmSync(agentDir, { recursive: true, force: true }));
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: string, talked = false) {
-  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
-    modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-  runtime.registerProvider('fixture', {
-    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-    models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-  });
+  const runtime = await fakeRuntime(dir, fakeProvider(undefined, { model: 'fixture' }), 'fixture');
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
   const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
     noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });

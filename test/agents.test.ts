@@ -4,16 +4,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
-import { createAgentSession, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
-import { Children, taskDirectory } from '../src/agents.ts';
+import { createAgentSession } from '@earendil-works/pi-coding-agent';
+import { taskDirectory } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { RunHistory } from '../src/runs.ts';
 import { emptyUsage, UsageLedger } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
 import { SUBAGENT, VIEW_DOC } from '../src/prompts.ts';
-
-// Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
-process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
+import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 
 async function until(condition: () => boolean) {
   const deadline = Date.now() + 10000;
@@ -25,37 +23,30 @@ test('real SDK children stream, report once per spawn, acknowledge steering, sto
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const usage = new UsageLedger(dir), reports: string[] = [], warnings: string[] = [];
   const releases = new Map<string, () => void>(), systemPrompts = new Set<string>();
-  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-  runtime.registerProvider('optchat-test', {
-    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple(model, context, options) {
-      const stream = createAssistantMessageEventStream();
-      for (const m of context.messages) if (m.role === 'system') systemPrompts.add([textContent(m.content), ...Object.values('sections' in m ? m.sections ?? {} : {})].join('\n'));
-      const initial = textContent(context.messages.find(m => m.role === 'user')?.content);
-      const task = initial.split('Your task:\n').at(-1) ?? '';
-      const guided = context.messages.some(m => m.role === 'user' && textContent(m.content) === 'Please include tests.');
-      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: guided ? 'Guidance received.' : `Working on ${task}` }],
-        api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop',
-        usage: { ...emptyUsage(), input: 100, output: 10, cacheRead: 50, totalTokens: 160, cost: { input: 0.01, output: 0.02, cacheRead: 0.001, cacheWrite: 0, total: 0.031 } } };
-      void (async () => {
-        stream.push({ type: 'start', partial: message });
-        stream.push({ type: 'text_delta', contentIndex: 0, delta: textContent(message.content), partial: message });
-        if (!guided) await new Promise<void>(resolve => {
-          const release = () => { options?.signal?.removeEventListener('abort', release); resolve(); };
-          releases.set(task, release); options?.signal?.addEventListener('abort', release, { once: true });
-          if (options?.signal?.aborted) release();
-        });
-        if (options?.signal?.aborted) { message.stopReason = 'aborted'; stream.push({ type: 'error', reason: 'aborted', error: message }); }
-        else stream.push({ type: 'done', reason: 'stop', message });
-        stream.end();
-      })();
-      return stream;
-    },
-  });
-  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => 'Profile instructions.',
-    async text => { reports.push(text); }, text => warnings.push(text), dir,
-    { usage, parentSession: 'parent-session', createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  const runtime = await fakeRuntime(dir, fakeProvider((model, context, options) => {
+    const stream = createAssistantMessageEventStream();
+    for (const m of context.messages) if (m.role === 'system') systemPrompts.add([textContent(m.content), ...Object.values('sections' in m ? m.sections ?? {} : {})].join('\n'));
+    const initial = textContent(context.messages.find(m => m.role === 'user')?.content);
+    const task = initial.split('Your task:\n').at(-1) ?? '';
+    const guided = context.messages.some(m => m.role === 'user' && textContent(m.content) === 'Please include tests.');
+    const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: guided ? 'Guidance received.' : `Working on ${task}` }],
+      api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop',
+      usage: { ...emptyUsage(), input: 100, output: 10, cacheRead: 50, totalTokens: 160, cost: { input: 0.01, output: 0.02, cacheRead: 0.001, cacheWrite: 0, total: 0.031 } } };
+    void (async () => {
+      stream.push({ type: 'start', partial: message });
+      stream.push({ type: 'text_delta', contentIndex: 0, delta: textContent(message.content), partial: message });
+      if (!guided) await new Promise<void>(resolve => {
+        const release = () => { options?.signal?.removeEventListener('abort', release); resolve(); };
+        releases.set(task, release); options?.signal?.addEventListener('abort', release, { once: true });
+        if (options?.signal?.aborted) release();
+      });
+      if (options?.signal?.aborted) { message.stopReason = 'aborted'; stream.push({ type: 'error', reason: 'aborted', error: message }); }
+      else stream.push({ type: 'done', reason: 'stop', message });
+      stream.end();
+    })();
+    return stream;
+  }, { cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 } }));
+  const children = makeChildren({ memory, runtime, dir, instructions: 'Profile instructions.', report: async text => { reports.push(text); }, warn: text => warnings.push(text), usage, parentSession: 'parent-session' });
   try {
     const [slow, fast, stopped] = await children.spawn([{ task: 'slow' }, { task: 'fast' }, { task: 'stop-me' }], dir);
     await until(() => releases.size === 3);
@@ -81,7 +72,7 @@ test('real SDK children stream, report once per spawn, acknowledge steering, sto
     assert.match(children.history.records.get(slow)?.report ?? '', /Guidance received/);
     assert.ok(usage.select('This session', 'parent-session').length >= 3);
     const before = usage.entries.length;
-    const restored = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '', async () => {}, text => warnings.push(text), dir, { usage, parentSession: 'new-parent' });
+    const restored = makeChildren({ memory, runtime, dir, warn: text => warnings.push(text), usage, parentSession: 'new-parent' });
     assert.equal(usage.entries.length, before, 'reloading saved children must not double count usage');
     assert.ok(restored.messages(slow).some(m => m.role === 'user' && textContent(m.content) === 'Please include tests.'));
     assert.equal(restored.history.records.get(fast)?.state, 'completed');
@@ -129,21 +120,15 @@ test('children get the main agent\'s extensions, AGENTS.md files and skills, but
   mkdirSync(join(agentDir, 'skills', 'demo-skill'), { recursive: true });
   writeFileSync(join(agentDir, 'skills', 'demo-skill', 'SKILL.md'), '---\nname: demo-skill\ndescription: Demo skill.\n---\nBody');
   let system = '';
-  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-  runtime.registerProvider('optchat-test', {
-    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple: (model, context) => {
-      const head = context.messages.find(m => m.role === 'system');
-      system = Object.values(head && 'sections' in head ? head.sections ?? {} : {}).join('\n');
-      const stream = createAssistantMessageEventStream();
-      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
-      queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
-      return stream;
-    },
-  });
-  const children = new Children(new Memory(dir, async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => 'PROFILE_RULES',
-    async () => {}, () => {}, dir, { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  const runtime = await fakeRuntime(dir, fakeProvider((model, context) => {
+    const head = context.messages.find(m => m.role === 'system');
+    system = Object.values(head && 'sections' in head ? head.sections ?? {} : {}).join('\n');
+    const stream = createAssistantMessageEventStream();
+    const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
+    queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
+    return stream;
+  }));
+  const children = makeChildren({ memory: new Memory(dir, async input => input.source.slice(0, 100), () => {}), runtime, dir, instructions: 'PROFILE_RULES' });
   try {
     await assert.rejects(children.spawn([{ task: 'nowhere', cwd: join(dir, 'missing') }], home), /No such directory/);
     const [id] = await children.spawn([{ task: 'inspect tools', cwd: project }], home);
@@ -162,37 +147,31 @@ test('a child can message the main agent mid-run', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-tell-parent-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const reports: string[] = [], warnings: string[] = [], releases = new Map<string, () => void>();
-  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-  runtime.registerProvider('optchat-test', {
-    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple(model, context, options) {
-      const stream = createAssistantMessageEventStream();
-      const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
-      const last = context.messages.at(-1), lastText = textContent(last && 'content' in last ? last.content : '');
-      const first = context.messages.filter(m => m.role === 'assistant').length === 0;
-      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: last?.role === 'toolResult' ? 'asked' : first ? `${task} working` : `${task} heard: ${lastText}` }],
-        api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
-      if (first && task.startsWith('asker')) {
-        message.content = [{ type: 'toolCall', id: `ask-${task}`, name: 'tell_parent', arguments: { message: `question from ${task}` } }];
-        message.stopReason = 'toolUse';
-      }
-      void (async () => {
-        stream.push({ type: 'start', partial: message });
-        // Hold each child's first turn.
-        const gate = first ? task : undefined;
-        if (gate) await new Promise<void>(resolve => {
-          releases.set(gate, resolve); options?.signal?.addEventListener('abort', () => resolve(), { once: true });
-          if (options?.signal?.aborted) resolve();
-        });
-        stream.push({ type: 'done', reason: message.stopReason === 'toolUse' ? 'toolUse' : 'stop', message });
-        stream.end();
-      })();
-      return stream;
-    },
-  });
-  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  const runtime = await fakeRuntime(dir, fakeProvider((model, context, options) => {
+    const stream = createAssistantMessageEventStream();
+    const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
+    const last = context.messages.at(-1), lastText = textContent(last && 'content' in last ? last.content : '');
+    const first = context.messages.filter(m => m.role === 'assistant').length === 0;
+    const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: last?.role === 'toolResult' ? 'asked' : first ? `${task} working` : `${task} heard: ${lastText}` }],
+      api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+    if (first && task.startsWith('asker')) {
+      message.content = [{ type: 'toolCall', id: `ask-${task}`, name: 'tell_parent', arguments: { message: `question from ${task}` } }];
+      message.stopReason = 'toolUse';
+    }
+    void (async () => {
+      stream.push({ type: 'start', partial: message });
+      // Hold each child's first turn.
+      const gate = first ? task : undefined;
+      if (gate) await new Promise<void>(resolve => {
+        releases.set(gate, resolve); options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+        if (options?.signal?.aborted) resolve();
+      });
+      stream.push({ type: 'done', reason: message.stopReason === 'toolUse' ? 'toolUse' : 'stop', message });
+      stream.end();
+    })();
+    return stream;
+  }));
+  const children = makeChildren({ memory, runtime, dir, report: async text => { reports.push(text); }, warn: text => warnings.push(text) });
   try {
     // Top-level child: the message reaches the main agent before the final report.
     const [top] = await children.spawn([{ task: 'asker-top' }], dir);
@@ -210,32 +189,26 @@ test('a child that fails to clean up still reports, is disposed, and frees its s
   const dir = mkdtempSync(join(tmpdir(), 'optchat-cleanup-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const reports: string[] = [], warnings: string[] = [], releases = new Map<string, () => void>();
-  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-  runtime.registerProvider('optchat-test', {
-    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple(model, context, options) {
-      const stream = createAssistantMessageEventStream();
-      const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
-      const last = context.messages.at(-1);
-      const first = context.messages.filter(m => m.role === 'assistant').length === 0;
-      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: first ? `${task} done` : `${task} heard: ${textContent(last && 'content' in last ? last.content : '')}` }],
-        api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
-      void (async () => {
-        stream.push({ type: 'start', partial: message });
-        // Hold each first turn so the test can break the child's cleanup before it finishes.
-        if (first) await new Promise<void>(resolve => {
-          releases.set(task, resolve); options?.signal?.addEventListener('abort', () => resolve(), { once: true });
-          if (options?.signal?.aborted) resolve();
-        });
-        stream.push({ type: 'done', reason: 'stop', message });
-        stream.end();
-      })();
-      return stream;
-    },
-  });
-  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  const runtime = await fakeRuntime(dir, fakeProvider((model, context, options) => {
+    const stream = createAssistantMessageEventStream();
+    const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
+    const last = context.messages.at(-1);
+    const first = context.messages.filter(m => m.role === 'assistant').length === 0;
+    const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: first ? `${task} done` : `${task} heard: ${textContent(last && 'content' in last ? last.content : '')}` }],
+      api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+    void (async () => {
+      stream.push({ type: 'start', partial: message });
+      // Hold each first turn so the test can break the child's cleanup before it finishes.
+      if (first) await new Promise<void>(resolve => {
+        releases.set(task, resolve); options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+        if (options?.signal?.aborted) resolve();
+      });
+      stream.push({ type: 'done', reason: 'stop', message });
+      stream.end();
+    })();
+    return stream;
+  }));
+  const children = makeChildren({ memory, runtime, dir, report: async text => { reports.push(text); }, warn: text => warnings.push(text) });
   const breakDispose = (id: string) => {
     const session = children.live(id)!.session, dispose = session.dispose.bind(session);
     session.dispose = () => { dispose(); throw new Error('dispose failed'); };
@@ -270,12 +243,7 @@ test('a batch that fails mid-launch rolls back every launched child even when th
   const dir = mkdtempSync(join(tmpdir(), 'optchat-rollback-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const warnings: string[] = [], disposed: string[] = [];
-  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-  runtime.registerProvider('optchat-test', {
-    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple() { throw new Error('rolled-back children never run'); },
-  });
+  const runtime = await fakeRuntime(dir, fakeProvider(() => { throw new Error('rolled-back children never run'); }));
   // The first two sessions launch with a dispose that throws; the third cannot be created.
   let created = 0;
   const createSession: typeof createAgentSession = async options => {
@@ -285,8 +253,7 @@ test('a batch that fails mid-launch rolls back every launched child even when th
     made.session.dispose = () => { dispose(); disposed.push(label); throw new Error(`${label} dispose failed`); };
     return made;
   };
-  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async () => {}, text => warnings.push(text), dir, { createSession });
+  const children = makeChildren({ memory, runtime, dir, warn: text => warnings.push(text), createSession });
   try {
     await assert.rejects(children.spawn([{ task: 'one' }, { task: 'two' }, { task: 'three' }], dir), /session store unavailable/);
     assert.deepEqual(disposed, ['session 1', 'session 2'], 'a throwing dispose does not skip the remaining children');
@@ -306,19 +273,8 @@ test('a batch that fails mid-launch rolls back every launched child even when th
 });
 
 async function quickChildren(dir: string) {
-  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-  runtime.registerProvider('optchat-test', {
-    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple: model => {
-      const stream = createAssistantMessageEventStream();
-      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
-      queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
-      return stream;
-    },
-  });
-  return new Children(new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async () => {}, () => {}, join(dir, 'profile'), { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  const runtime = await fakeRuntime(dir, fakeProvider('done'));
+  return makeChildren({ memory: new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {}), runtime, dir: join(dir, 'profile') });
 }
 
 test('a task cwd may start with ~ or be relative to the spawning agent; a missing one is refused', async () => {

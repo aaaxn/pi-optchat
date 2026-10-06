@@ -4,16 +4,15 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
-import { createAgentSession, ModelRegistry, ModelRuntime, SessionManager, initTheme } from '@earendil-works/pi-coding-agent';
+import { ModelRuntime, SessionManager, initTheme } from '@earendil-works/pi-coding-agent';
 import { TuiMainScreen, visibleWidth, type Terminal, type TuiMouseEvent } from '@earendil-works/pi-tui';
-import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { AgentView, TranscriptView } from '../src/agent-view.ts';
 import { textContent } from '../src/transcript.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { emptyUsage } from '../src/usage.ts';
+import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 
-process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 initTheme('dark', false);
 
 class OffscreenTerminal implements Terminal {
@@ -27,7 +26,7 @@ test('agent view shows the child conversation like the main chat, fills the scre
   const dir = mkdtempSync(join(tmpdir(), 'optchat-agent-view-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, refreshOnCreate: false });
-  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'test', model: 'test', thinking: 'high' }), () => '', async () => {}, () => {}, dir);
+  const children = makeChildren({ memory, runtime, dir, choice: { provider: 'test', model: 'test', thinking: 'high' } });
   const session = SessionManager.create(dir, join(dir, 'runs'));
   const assistant = { api: 'anthropic-messages', provider: 'test', model: 'test', usage: emptyUsage() } as const;
   session.appendMessage({ role: 'user', content: 'MEMORY VIEW MUST NOT APPEAR\n\nYour task:\nCount the files', timestamp: 1 });
@@ -72,7 +71,7 @@ test('agent view labels guidance from the main agent, keeps the controls, and sc
   const dir = mkdtempSync(join(tmpdir(), 'optchat-agent-view-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, refreshOnCreate: false });
-  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'test', model: 'test', thinking: 'high' }), () => '', async () => {}, () => {}, dir);
+  const children = makeChildren({ memory, runtime, dir, choice: { provider: 'test', model: 'test', thinking: 'high' } });
   const session = SessionManager.create(dir, join(dir, 'runs'));
   session.appendMessage({ role: 'user', content: 'Your task:\nCheck it', timestamp: 1 });
   for (let i = 0; i < 20; i++) session.appendMessage({ role: 'assistant', ...assistant, stopReason: 'stop', timestamp: 2, content: [{ type: 'text', text: `line ${i}` }] });
@@ -123,25 +122,19 @@ test('running tools show their real elapsed time, finished ones how long they to
 test('agent view drives a running agent: streaming, guidance from the input, drafts, and a two-press stop', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-agent-live-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
-  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-  runtime.registerProvider('optchat-test', {
-    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple(model, context, options) {
-      const stream = createAssistantMessageEventStream();
-      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: `Working on ${textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1)}` }],
-        api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
-      void (async () => {
-        stream.push({ type: 'start', partial: message });
-        stream.push({ type: 'text_delta', contentIndex: 0, delta: textContent(message.content), partial: message });
-        await new Promise<void>(resolve => { options?.signal?.addEventListener('abort', () => resolve(), { once: true }); if (options?.signal?.aborted) resolve(); });
-        message.stopReason = 'aborted'; stream.push({ type: 'error', reason: 'aborted', error: message }); stream.end();
-      })();
-      return stream;
-    },
-  });
-  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async () => {}, () => {}, dir, { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  const runtime = await fakeRuntime(dir, fakeProvider((model, context, options) => {
+    const stream = createAssistantMessageEventStream();
+    const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: `Working on ${textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1)}` }],
+      api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+    void (async () => {
+      stream.push({ type: 'start', partial: message });
+      stream.push({ type: 'text_delta', contentIndex: 0, delta: textContent(message.content), partial: message });
+      await new Promise<void>(resolve => { options?.signal?.addEventListener('abort', () => resolve(), { once: true }); if (options?.signal?.aborted) resolve(); });
+      message.stopReason = 'aborted'; stream.push({ type: 'error', reason: 'aborted', error: message }); stream.end();
+    })();
+    return stream;
+  }));
+  const children = makeChildren({ memory, runtime, dir });
   const tui = new TuiMainScreen(new OffscreenTerminal());
   let closed = 0;
   const [id] = await children.spawn([{ task: 'live-task' }], dir);

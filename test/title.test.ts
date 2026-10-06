@@ -1,19 +1,18 @@
-import { after, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { mainTitle, TabTitle } from '../src/title.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
+import { fakeProvider, fakeRuntime } from './fakes.ts';
 
-const agentDir = process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
-after(() => rmSync(agentDir, { recursive: true, force: true }));
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate: () => boolean) {
   const deadline = Date.now() + 10000;
@@ -56,32 +55,25 @@ test('the main window title follows the real Pi session: profile, working, runni
     createProfile('fixture');
     const config = loadConfig(profilePath('fixture'));
     saveConfig(profilePath('fixture'), { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' }, subagent: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
-    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
-      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-    runtime.registerProvider('fixture', {
-      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-      streamSimple(model, context) {
-        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
-        const last = context.messages.at(-1);
-        const text = textContent(last?.content);
-        const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: compression ? 'Summary.' : 'Done.' }],
-          timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
-        if (!compression && last?.role === 'user' && text.endsWith('Spawn one.')) {
-          reply.stopReason = 'toolUse';
-          reply.content = [{ type: 'toolCall', id: 'spawn-1', name: 'spawn', arguments: { tasks: [{ task: 'child task' }] } }];
-        }
-        const stream = createAssistantMessageEventStream();
-        void (async () => {
-          if (!compression && text.endsWith('Long task.')) { stream.push({ type: 'start', partial: reply }); notifyHeld(); await released; }
-          if (!compression && text.endsWith('child task')) { stream.push({ type: 'start', partial: reply }); await childReleased; }
-          stream.push({ type: 'done', reason: reply.stopReason === 'toolUse' ? 'toolUse' : 'stop', message: reply });
-          stream.end();
-        })();
-        return stream;
-      },
-    });
+    const runtime = await fakeRuntime(dir, fakeProvider((model, context) => {
+      const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+      const last = context.messages.at(-1);
+      const text = textContent(last?.content);
+      const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: compression ? 'Summary.' : 'Done.' }],
+        timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
+      if (!compression && last?.role === 'user' && text.endsWith('Spawn one.')) {
+        reply.stopReason = 'toolUse';
+        reply.content = [{ type: 'toolCall', id: 'spawn-1', name: 'spawn', arguments: { tasks: [{ task: 'child task' }] } }];
+      }
+      const stream = createAssistantMessageEventStream();
+      void (async () => {
+        if (!compression && text.endsWith('Long task.')) { stream.push({ type: 'start', partial: reply }); notifyHeld(); await released; }
+        if (!compression && text.endsWith('child task')) { stream.push({ type: 'start', partial: reply }); await childReleased; }
+        stream.push({ type: 'done', reason: reply.stopReason === 'toolUse' ? 'toolUse' : 'stop', message: reply });
+        stream.end();
+      })();
+      return stream;
+    }, { model: 'fixture' }), 'fixture');
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
     const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
       noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });

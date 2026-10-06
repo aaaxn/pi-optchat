@@ -4,14 +4,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createAssistantMessageEventStream, getCurrentTools, type AssistantMessage } from '@earendil-works/pi-ai';
-import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager, getAgentDir, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { builtinExtensions, Children, loadedBuiltins } from '../src/agents.ts';
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, getAgentDir, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { builtinExtensions, loadedBuiltins } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
+import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 
-// The MCP extension reads mcp.json, its log and OAuth tokens from Pi's agent dir: never the user's real one.
-const agentDir = process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-builtins-agent-'));
+const agentDir = getAgentDir();
 const server = resolve(import.meta.dirname, 'fixtures', 'fake-mcp.mjs');
 const ALL = ['mcp', 'codemode', 'tool-search'];
 
@@ -47,28 +47,22 @@ test('every subagent gets the main session\'s built-in extensions and can call M
   writeFileSync(join(agentDir, 'mcp.json'), JSON.stringify({ mcpServers: { fake: { command: process.execPath, args: [server, log], exposure: 'direct' } } }));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const reports: string[] = [], warnings: string[] = [], seen = new Map<string, string[]>();
-  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   // Every task calls the MCP tool and reports its output.
-  runtime.registerProvider('optchat-test', {
-    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple(model, context) {
-      const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
-      seen.set(task, getCurrentTools(context.messages).map(t => t.name));
-      const last = context.messages.at(-1), first = !context.messages.some(m => m.role === 'assistant');
-      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: `${task}: ${textContent(last && 'content' in last ? last.content : '')}` }],
-        api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
-      if (first) {
-        message.content = [{ type: 'toolCall', id: `echo-${task}`, name: 'mcp__fake__echo', arguments: { text: task } }];
-        message.stopReason = 'toolUse';
-      }
-      const stream = createAssistantMessageEventStream();
-      queueMicrotask(() => { stream.push({ type: 'done', reason: message.stopReason === 'toolUse' ? 'toolUse' : 'stop', message }); stream.end(); });
-      return stream;
-    },
-  });
-  const spawnChildren = (builtins: string[]) => new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { builtins: () => builtins, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  const runtime = await fakeRuntime(dir, fakeProvider((model, context) => {
+    const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
+    seen.set(task, getCurrentTools(context.messages).map(t => t.name));
+    const last = context.messages.at(-1), first = !context.messages.some(m => m.role === 'assistant');
+    const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: `${task}: ${textContent(last && 'content' in last ? last.content : '')}` }],
+      api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+    if (first) {
+      message.content = [{ type: 'toolCall', id: `echo-${task}`, name: 'mcp__fake__echo', arguments: { text: task } }];
+      message.stopReason = 'toolUse';
+    }
+    const stream = createAssistantMessageEventStream();
+    queueMicrotask(() => { stream.push({ type: 'done', reason: message.stopReason === 'toolUse' ? 'toolUse' : 'stop', message }); stream.end(); });
+    return stream;
+  }));
+  const spawnChildren = (builtins: string[]) => makeChildren({ memory, runtime, dir, report: async text => { reports.push(text); }, warn: text => warnings.push(text), builtins: () => builtins });
   const servers = () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [];
   try {
     const children = spawnChildren(await mainBuiltins(dir, {}));
@@ -102,15 +96,9 @@ test('a batch that fails mid-launch closes the MCP connections of the children i
   const log = join(dir, 'servers.log');
   writeFileSync(join(agentDir, 'mcp.json'), JSON.stringify({ mcpServers: { fake: { command: process.execPath, args: [server, log], exposure: 'direct' } } }));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
-  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-  runtime.registerProvider('optchat-test', {
-    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple() { throw new Error('rolled-back children never run'); },
-  });
+  const runtime = await fakeRuntime(dir, fakeProvider(() => { throw new Error('rolled-back children never run'); }));
   let created = 0;
-  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async () => {}, () => {}, dir, { builtins: () => ALL, createSession: async options => {
+  const children = makeChildren({ memory, runtime, dir, builtins: () => ALL, createSession: async options => {
       if (++created === 2) {
         // Fail only once the first child's server is up, so its connection must be closed.
         await until(() => existsSync(log));
@@ -130,14 +118,8 @@ test('a child whose extensions fail to start still closes its MCP connections', 
   const log = join(dir, 'servers.log');
   writeFileSync(join(agentDir, 'mcp.json'), JSON.stringify({ mcpServers: { fake: { command: process.execPath, args: [server, log], exposure: 'direct' } } }));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
-  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-  runtime.registerProvider('optchat-test', {
-    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple() { throw new Error('the child never runs'); },
-  });
-  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async () => {}, () => {}, dir, { builtins: () => ALL, createSession: async options => {
+  const runtime = await fakeRuntime(dir, fakeProvider(() => { throw new Error('the child never runs'); }));
+  const children = makeChildren({ memory, runtime, dir, builtins: () => ALL, createSession: async options => {
       const made = await createAgentSession({ ...options, modelRuntime: runtime }), bind = made.session.bindExtensions.bind(made.session);
       // Binding starts the MCP connection, then fails.
       made.session.bindExtensions = async bindings => { await bind(bindings); await until(() => existsSync(log)); throw new Error('binding failed'); };

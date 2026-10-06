@@ -7,6 +7,8 @@ import { relative, resolve } from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { dataHome } from '../src/profiles.ts';
 
+const print = 'console.log(JSON.stringify([process.env.HOME, process.env.OPTCHAT_HOME, process.env.PI_CODING_AGENT_DIR]))';
+const run = (preload: string) => JSON.parse(spawnSync(process.execPath, ['--import', 'tsx', '--import', resolve(import.meta.dirname, preload), '-e', print], { encoding: 'utf8' }).stdout) as string[];
 const under = (parent: string, path: string) => !relative(resolve(parent), resolve(path)).startsWith('..');
 
 test('a test process reaches the home directory, OptChat data and Pi agent dir only through fresh temporary directories', () => {
@@ -20,9 +22,12 @@ test('a test process reaches the home directory, OptChat data and Pi agent dir o
 });
 
 test('the directories are removed when the process exits and differ between processes', () => {
-  const print = 'console.log(JSON.stringify([process.env.HOME, process.env.OPTCHAT_HOME, process.env.PI_CODING_AGENT_DIR]))';
-  const run = () => JSON.parse(spawnSync(process.execPath, ['--import', 'tsx', '--import', resolve(import.meta.dirname, 'support.ts'), '-e', print], { encoding: 'utf8' }).stdout) as string[];
-  const [first, second] = [run(), run()];
+  const [first, second] = [run('support.ts'), run('support.ts')];
   for (const dir of [...first, ...second]) assert.ok(under(tmpdir(), dir) && !existsSync(dir), `${dir} was removed at exit`);
   assert.equal(new Set([...first, ...second]).size, 6, 'every process gets its own');
+});
+
+test('importing the test helpers alone is enough, so a single test file is isolated without --import', () => {
+  const dirs = run('fakes.ts');
+  for (const dir of dirs) assert.ok(under(tmpdir(), dir) && !existsSync(dir), `${dir} was removed at exit`);
 });

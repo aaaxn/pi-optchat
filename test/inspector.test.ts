@@ -3,23 +3,20 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { visibleWidth } from '@earendil-works/pi-tui';
-import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { fit, Inspector, type InspectorAction } from '../src/inspector.ts';
 import { UsageLedger } from '../src/usage.ts';
 import { RunHistory } from '../src/runs.ts';
-
-// Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
-process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
+import { makeChildren } from './fakes.ts';
 
 test('inspector reaches old runs, opens the selected agent, shows usage, resizes, and shuts down', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-inspector-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const usage = new UsageLedger(dir), controller = new AbortController();
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, refreshOnCreate: false });
-  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'test', model: 'test', thinking: 'high' }), () => '', async () => {}, () => {}, dir);
+  const children = makeChildren({ memory, runtime, dir, choice: { provider: 'test', model: 'test', thinking: 'high' } });
   for (let i = 0; i < 100; i++) children.history.records.set(`run-${i}`, { id: `run-${i}`, task: `Task ${i} ${'long title '.repeat(20)}`, cwd: dir, model: 'test', thinking: 'high',
     parentSession: 'parent', started: 1000 - i, ended: 2000, state: 'completed', guidance: [] });
   let rows = 24;

@@ -5,12 +5,13 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type UserMessage } from '@earendil-works/pi-ai';
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { buildContext, textContent, typedText } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
+import { fakeProvider, fakeRuntime } from './fakes.ts';
 
 const user = (content: UserMessage['content']): UserMessage => ({ role: 'user', content, timestamp: 1 });
 const answer = (text: string, stopReason: AssistantMessage['stopReason'] = 'stop'): AssistantMessage => ({
@@ -48,41 +49,34 @@ test('real Pi lifecycle starts every turn from the view alone, across tool calls
     createProfile('fixture');
     const config = loadConfig(profilePath('fixture'));
     saveConfig(profilePath('fixture'), { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
-    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
-      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-    runtime.registerProvider('fixture', {
-      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-      streamSimple(model, context) {
-        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
-        const snapshot = structuredClone(context);
-        snapshot.messages = snapshot.messages.filter(m => m.role !== 'system');
-        if (!compression) captured.push(snapshot);
-        const latest = context.messages.at(-1);
-        const text = textContent(latest?.content).split('</chat>').at(-1)!.trim();
-        const reply = answer(compression ? 'Summary of fixture exchanges.' : latest?.role === 'toolResult' ? 'Because Append preserves existing summaries.' : `Answer to: ${text}`);
-        reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
-        if (text === 'Why is that?') {
-          reply.stopReason = 'toolUse';
-          reply.content = [{ type: 'toolCall', id: 'zoom-1', name: 'zoom', arguments: { id: 0, n: 1 } }];
+    const runtime = await fakeRuntime(dir, fakeProvider((model, context) => {
+      const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+      const snapshot = structuredClone(context);
+      snapshot.messages = snapshot.messages.filter(m => m.role !== 'system');
+      if (!compression) captured.push(snapshot);
+      const latest = context.messages.at(-1);
+      const text = textContent(latest?.content).split('</chat>').at(-1)!.trim();
+      const reply = answer(compression ? 'Summary of fixture exchanges.' : latest?.role === 'toolResult' ? 'Because Append preserves existing summaries.' : `Answer to: ${text}`);
+      reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
+      if (text === 'Why is that?') {
+        reply.stopReason = 'toolUse';
+        reply.content = [{ type: 'toolCall', id: 'zoom-1', name: 'zoom', arguments: { id: 0, n: 1 } }];
+      }
+      const stream = createAssistantMessageEventStream();
+      void (async () => {
+        if (text === 'Task with constraints.') {
+          stream.push({ type: 'start', partial: reply });
+          notifySteeringStarted();
+          await steeringRelease;
         }
-        const stream = createAssistantMessageEventStream();
-        void (async () => {
-          if (text === 'Task with constraints.') {
-            stream.push({ type: 'start', partial: reply });
-            notifySteeringStarted();
-            await steeringRelease;
-          }
-          if (text === 'Fail now.') {
-            reply.stopReason = 'error'; reply.errorMessage = 'Synthetic failure';
-            stream.push({ type: 'error', reason: 'error', error: reply });
-          } else stream.push({ type: 'done', reason: reply.stopReason === 'toolUse' ? 'toolUse' : 'stop', message: reply });
-          stream.end();
-        })();
-        return stream;
-      },
-    });
+        if (text === 'Fail now.') {
+          reply.stopReason = 'error'; reply.errorMessage = 'Synthetic failure';
+          stream.push({ type: 'error', reason: 'error', error: reply });
+        } else stream.push({ type: 'done', reason: reply.stopReason === 'toolUse' ? 'toolUse' : 'stop', message: reply });
+        stream.end();
+      })();
+      return stream;
+    }, { model: 'fixture' }), 'fixture');
     const open = async (manager: SessionManager) => {
       const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
       const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
@@ -168,19 +162,12 @@ test('a skill command is logged once, as its expansion, and never recovered as a
     saveConfig(profilePath('fixture'), { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
     mkdirSync(join(dir, 'skills', 'demo'), { recursive: true });
     writeFileSync(join(dir, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: Demo skill.\n---\n\nFollow the demo steps.\n');
-    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
-      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-    runtime.registerProvider('fixture', {
-      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-      streamSimple(model) {
-        const reply = answer('Done.'); reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
-        const stream = createAssistantMessageEventStream();
-        void (async () => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); })();
-        return stream;
-      },
-    });
+    const runtime = await fakeRuntime(dir, fakeProvider(model => {
+      const reply = answer('Done.'); reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
+      const stream = createAssistantMessageEventStream();
+      void (async () => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); })();
+      return stream;
+    }, { model: 'fixture' }), 'fixture');
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
     const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager, noExtensions: true, noContextFiles: true,
       noSkills: true, additionalSkillPaths: [join(dir, 'skills')], noPromptTemplates: true, extensionFactories: [optchat] });
@@ -221,22 +208,15 @@ test('main agent keeps Pi\'s AGENTS.md files and skills, with profile instructio
     writeFileSync(join(agentDir, 'AGENTS.md'), 'GLOBAL_RULES');
     writeFileSync(join(dir, 'AGENTS.md'), 'REPO_RULES');
     const systems: string[] = [];
-    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
-      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-    runtime.registerProvider('fixture', {
-      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-      streamSimple(model, context) {
-        const system = textContent(context.messages.find(m => m.role === 'system')?.content);
-        if (system !== COMPACT) systems.push(system);
-        const reply = answer(system === COMPACT ? 'Summary.' : 'Done.');
-        reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
-        const stream = createAssistantMessageEventStream();
-        queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); });
-        return stream;
-      },
-    });
+    const runtime = await fakeRuntime(dir, fakeProvider((model, context) => {
+      const system = textContent(context.messages.find(m => m.role === 'system')?.content);
+      if (system !== COMPACT) systems.push(system);
+      const reply = answer(system === COMPACT ? 'Summary.' : 'Done.');
+      reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
+      const stream = createAssistantMessageEventStream();
+      queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); });
+      return stream;
+    }, { model: 'fixture' }), 'fixture');
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
     const loader = new DefaultResourceLoader({ cwd: dir, agentDir, settingsManager, noExtensions: true, noPromptTemplates: true, extensionFactories: [optchat] });
     await loader.reload();
@@ -268,19 +248,12 @@ test('a /skill: command is logged once, as its expansion, and never recovered as
     saveConfig(profilePath('fixture'), { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
     mkdirSync(join(dir, 'skills', 'demo'), { recursive: true });
     writeFileSync(join(dir, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: Demo skill.\n---\n\nFollow the demo steps.\n');
-    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
-      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-    runtime.registerProvider('fixture', {
-      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-      streamSimple(model) {
-        const reply = answer('Done.'); reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
-        const stream = createAssistantMessageEventStream();
-        queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); });
-        return stream;
-      },
-    });
+    const runtime = await fakeRuntime(dir, fakeProvider(model => {
+      const reply = answer('Done.'); reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
+      const stream = createAssistantMessageEventStream();
+      queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); });
+      return stream;
+    }, { model: 'fixture' }), 'fixture');
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
     const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager, noExtensions: true, noContextFiles: true,
       noSkills: true, additionalSkillPaths: [join(dir, 'skills')], noPromptTemplates: true, extensionFactories: [optchat] });
@@ -326,19 +299,12 @@ test('inputs with images are claimed too, including /skill: commands and Pi\'s i
     saveConfig(profilePath('fixture'), { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
     mkdirSync(join(dir, 'skills', 'demo'), { recursive: true });
     writeFileSync(join(dir, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: Demo skill.\n---\n\nFollow the demo steps.\n');
-    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
-      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-    runtime.registerProvider('fixture', {
-      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-      streamSimple(model) {
-        const reply = answer('Done.'); reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
-        const stream = createAssistantMessageEventStream();
-        queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); });
-        return stream;
-      },
-    });
+    const runtime = await fakeRuntime(dir, fakeProvider(model => {
+      const reply = answer('Done.'); reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
+      const stream = createAssistantMessageEventStream();
+      queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); });
+      return stream;
+    }, { model: 'fixture' }), 'fixture');
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
     const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager, noExtensions: true, noContextFiles: true,
       noSkills: true, additionalSkillPaths: [join(dir, 'skills')], noPromptTemplates: true, extensionFactories: [optchat] });
