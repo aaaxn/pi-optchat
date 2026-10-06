@@ -1,3 +1,4 @@
+import './support.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BarNavigation, inspectorShortcut } from '../src/navigation.ts';

@@ -1,3 +1,4 @@
+import './support.ts';
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
