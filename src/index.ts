@@ -14,7 +14,7 @@ import { cacheFor, record } from './cache.ts';
 import { asUser, boundedMessage, buildContext, logMessage, REPORT_TYPE, textContent, typedText } from './transcript.ts';
 import { registerReportRenderer } from './report-message.ts';
 import { memoryTools, result } from './tools.ts';
-import { Children, CWD_DOC } from './agents.ts';
+import { Children, CWD_DOC, loadedBuiltins } from './agents.ts';
 import { exportBrowser } from './browser.ts';
 import { Inbox } from './inbox.ts';
 import { checkpoint } from './checkpoint.ts';
@@ -135,8 +135,8 @@ export default function optchat(pi: ExtensionAPI) {
       const inbox = new Inbox(dir);
       const recovered = pendingImport(dir) ? 0 : inbox.recover(memory);
       if (recovered) ctx.ui.notify(`Recovered ${recovered} unanswered inputs into ${name}'s memory. Ask to continue them when ready.`, 'info');
-      const children = new Children(memory, ctx.modelRegistry, () => config.subagent, () => instructions(dir),
-        deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage });
+      const children = new Children(memory, ctx.modelRegistry, () => config.subagent, () => `${instructions(dir)}\n\n${IMPORT_GUIDANCE}`,
+        deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage, builtins: () => loadedBuiltins(pi) });
       const loggedReports = new Set(memory.root.map(e => e.receipt));
       reports = saved.filter((s): s is string => typeof s === 'string' && !loggedReports.has(reportReceipt(s)));
       atomicWrite(pending, JSON.stringify(reports));
@@ -290,7 +290,7 @@ export default function optchat(pi: ExtensionAPI) {
       return result(`Started: ${ids.join(', ')}. Reports will arrive automatically.`);
     },
   });
-  pi.registerTool({ name: 'tell', label: 'Tell background agent', description: 'Send a message to a running subagent at its next tool boundary.',
+  pi.registerTool({ name: 'tell', label: 'Tell background agent', description: 'Send a message to a subagent. A running one gets it at its next tool boundary. A finished one you started is resumed with its earlier conversation, and its new report arrives automatically.',
     parameters: Type.Object({ id: Type.String(), message: Type.String() }),
     async execute(_id, args) { return result(await required().children.tell(args.id, args.message)); },
   });
