@@ -1,6 +1,6 @@
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CAP, NODE, VIEW, Memory, isView, appendJson, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
@@ -370,4 +370,35 @@ test('rebuilding a leaf that a saved parent already hides does not inflate the v
     assert.equal(memory.size, measured(memory));
     assert.ok(memory.size <= 80);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a log whose day files sort against the order of the entries still opens, and a broken one does not', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-order-')), compress = async () => 'summary';
+  const home = process.env.TZ;
+  mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-05T17:00:00Z') });
+  const opened: Memory[] = [];
+  try {
+    process.env.TZ = 'Asia/Tokyo';
+    let memory = new Memory(dir, compress, () => {}); opened.push(memory);
+    memory.append('user', 'a'); memory.append('user', 'b'); await memory.close();
+    process.env.TZ = 'America/Sao_Paulo';
+    memory = new Memory(dir, compress, () => {}); opened.push(memory);
+    memory.append('user', 'c'); await memory.close();
+    assert.deepEqual(readdirSync(join(dir, 'main')).sort(), ['2026-10-05.jsonl', '2026-10-06.jsonl']);
+    memory = new Memory(dir, compress, () => {}); opened.push(memory);
+    assert.deepEqual(memory.root.map(e => e.text), ['a', 'b', 'c']);
+    await memory.close();
+  } finally {
+    mock.timers.reset();
+    if (home === undefined) delete process.env.TZ; else process.env.TZ = home;
+    await Promise.all(opened.map(m => m.close()));
+  }
+  const entry = (i: number) => JSON.stringify({ i, kind: 'user', text: `m${i}`, date: new Date().toISOString() }) + '\n';
+  try {
+    writeFileSync(join(dir, 'main', '2026-10-05.jsonl'), entry(2) + entry(2));
+    assert.throws(() => new Memory(dir, compress, () => {}), /noncontiguous/);
+    writeFileSync(join(dir, 'main', '2026-10-05.jsonl'), entry(2));
+    writeFileSync(join(dir, 'main', '2026-10-06.jsonl'), entry(0) + entry(3));
+    assert.throws(() => new Memory(dir, compress, () => {}), /noncontiguous/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

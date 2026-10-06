@@ -99,10 +99,9 @@ export class Memory {
     for (const sub of ['main', 'tree']) mkdirSync(join(directory, sub), { recursive: true, mode: 0o700 });
     const main = join(directory, 'main'), log = records(main, warn);
     for (const name of readdirSync(main).filter(n => n.endsWith('.jsonl'))) this.lastSeenBytes.set(join(main, name), statSync(join(main, name)).size);
-    for (const value of log) {
-      if (!isEntry(value) || value.i !== this.root.length) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
-      this.root.push({ ...value, size: bytes(`${value.kind}: ${value.text}`) });
-    }
+    const entries = log.every(isEntry) ? log.sort((a, b) => a.i - b.i) : undefined;
+    if (!entries || entries.some((entry, i) => entry.i !== i)) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
+    for (const value of entries) this.root.push({ ...value, size: bytes(`${value.kind}: ${value.text}`) });
     for (const value of records(join(directory, 'tree'), warn)) {
       if (!isSummary(value) || value.l < 0 || value.i < 0 || end(value) > this.root.length)
         throw new Error('Invalid OptChat summary record.');
