@@ -592,3 +592,50 @@ test('lint rejects a comparison of an import source with a name outside the adap
       [1, 2, 3].map(line => `src/import/branch.ts:${line} source-branch ${message}`));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('the import dialog asks each source its own questions and lists a Codex conversation under its first real message', async () => {
+  const home = process.env.HOME ?? '', root = temp(), memory = new Memory(root, short);
+  const claude = join(home, '.claude/projects/-synthetic'), rollouts = join(home, '.codex/sessions/2026');
+  for (const dir of [join(claude, 'memory'), rollouts]) mkdirSync(dir, { recursive: true });
+  lines(join(claude, 'session.jsonl'), [{ type: 'user', uuid: 'u', sessionId: 's1', cwd: '/synthetic', timestamp: date, message: { role: 'user', content: 'claude question' } }]);
+  writeFileSync(join(claude, 'memory', 'note.md'), '---\nname: Note\n---\nremember this\n');
+  copyFileSync(codexFixture, join(rollouts, 'rollout.jsonl'));
+  const chatgpt = join(root, 'conversations.json');
+  writeFileSync(chatgpt, JSON.stringify([{ id: 'chat-1', title: 'ChatGPT title', create_time: 100, mapping: { u: { parent: null, message: { id: 'u', author: { role: 'user' }, create_time: 100, content: { parts: ['hi'] } } } } }]));
+  const drive = async (label: string) => {
+    const asked: string[] = [], pickers: string[] = [];
+    let preview = '';
+    const ui: Parameters<typeof chooseImport>[0]['ui'] = {
+      select: async (title, options) => { asked.push(title.split('\n')[0]); return title.startsWith('Import into') ? label : options.find(o => o.startsWith('Choose individual')) ?? options[0]; },
+      input: async prompt => { asked.push(prompt); return chatgpt; },
+      confirm: async (_title, message) => { preview = message; return false; }, notify: () => {}, setWidget: () => {},
+      custom: factory => new Promise(resolve => {
+        const component = factory({ terminal: { rows: 40 }, requestRender: () => {} } as never, { fg: (_tone: string, text: string) => text } as never, undefined as never, resolve as never);
+        if ('render' in component) pickers.push(component.render(120).join('\n'));
+        if ('handleInput' in component) { component.handleInput?.('\x01'); component.handleInput?.('\r'); }
+      }),
+    };
+    await chooseImport({ ui }, 'test', memory, 'fixture', new AbortController().signal);
+    return { asked, pickers, preview };
+  };
+  try {
+    const codexRun = await drive('Codex');
+    assert.deepEqual(codexRun.asked, ['Import into test · source', 'Conversation dates', '1 conversations · 0.0 MB source files']);
+    assert.match(codexRun.pickers[0], /^Projects · 0 selected/);
+    assert.match(codexRun.pickers[1], /^Conversations · 0 selected[\s\S]*2026-03-04 · Add a --dry-run flag to the sync command\. · 0199c0de-1111-7222-8333-444455556666/);
+    assert.match(codexRun.preview, /Historical user messages and final replies; tool activity excluded\.\n1 conversations selected · 4 new messages · 0 duplicates skipped/);
+    const claudeRun = await drive('Claude Code');
+    assert.deepEqual(claudeRun.asked, codexRun.asked);
+    assert.match(claudeRun.pickers[1], /claude question/);
+    const memoryRun = await drive('Claude Code memories');
+    assert.deepEqual(memoryRun.asked, ['Import into test · source', 'Memory dates', '1 memories · 0.0 MB source files']);
+    assert.match(memoryRun.pickers[1], /^Memories · 0 selected/);
+    assert.match(memoryRun.preview, /Each memory file as one dated historical note; MEMORY\.md indexes excluded\.\n1 memories selected · 1 new notes/);
+    const chatgptRun = await drive('ChatGPT export');
+    assert.deepEqual(chatgptRun.asked, ['Import into test · source', 'ChatGPT export ZIP, extracted folder, or conversations JSON path', 'Conversation dates', '1 conversations · 0.0 MB source files']);
+    assert.equal(chatgptRun.pickers.length, 1, 'ChatGPT conversations have no projects to pick');
+  } finally {
+    await memory.close();
+    for (const dir of [join(home, '.claude'), join(home, '.codex'), root]) rmSync(dir, { recursive: true, force: true });
+  }
+});
