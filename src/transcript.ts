@@ -1,6 +1,6 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { getCurrentSystemMessage, type SystemMessage } from '@earendil-works/pi-ai';
-import { cap, type Memory } from './memory.ts';
+import { CAP, cap, type Memory } from './memory.ts';
 
 /** Subagent traffic to the main agent: a custom message on screen, a plain user message to the model and memory. */
 export const REPORT_TYPE = 'optchat-report';
@@ -41,7 +41,7 @@ export function logMessage(memory: Memory, message: AgentMessage, receipt?: stri
 export function boundedMessage(message: AgentMessage): AgentMessage {
   if (message.role !== 'toolResult') return message;
   const text = message.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
-  if (text.length <= 30_000) return message;
+  if (text.length <= CAP) return message;
   return { ...message, content: [{ type: 'text', text: cap(text) }, ...message.content.filter(c => c.type === 'image')] };
 }
 /** Keep only the current run; all earlier history comes from the view. */
