@@ -4,7 +4,7 @@ pi-optchat is a Pi extension that implements [Victor Taelin's OptChat recipe](ht
 
 When sources disagree, follow them in this order:
 
-1. The user's explicit instructions.
+1. The user's explicit instructions. Before overriding a rule here, ask for confirmation (see [User override](#user-override)).
 2. The recipe.
 3. The fork's design, listed in [Keep the fork's design](#keep-the-forks-design) and in [FORK.md](FORK.md).
 4. Upstream.
@@ -48,15 +48,15 @@ The recipe's checklist (§11), with where this code enforces each item:
 | # | Never | Where |
 |---|---|---|
 | 1 | Recompute the view to fit the budget. Append, merge the most due pair, and never split (§5.2) | `src/memory.ts` |
-| 2 | Put a whole message in the view. The view holds summaries only, not even the last reply | `src/memory.ts` |
-| 3 | Show cut text for an unsummarized message. A turn or a spawn waits in `settle` until every view line is a summary (§6) | `src/memory.ts`, `src/index.ts` |
-| 4 | Call the compactor without the `<chat>` context block (§4.2) | `src/compactor.ts` |
-| 5 | Put ids anywhere in a compactor call: not in the context, the step, or `SCALE` | `src/compactor.ts` |
+| 2 | Put a whole message in the view. The view holds summaries only, not even the last reply. A message of at most 512 bytes is its own summary, word for word (§3) | `src/memory.ts` |
+| 3 | Show cut text for an unsummarized message. A turn or a spawn waits in `settle` until every view line is a summary (§6) | `src/memory.ts`, `src/index.ts`, `src/agents.ts` |
+| 4 | Call the compactor without the `<chat>` context block (§4.2) | `src/memory.ts`, `src/compactor.ts` |
+| 5 | Put ids anywhere in a compactor call: not in the context, the step, or `SCALE` | `src/memory.ts`, `src/compactor.ts` |
 | 6 | Trust the model to count bytes. Use `SCALE`, the cut-at-limit retry, 5 tries, and keep the shortest (§4.3) | `src/compactor.ts` |
-| 7 | Shorten summary lines below 512 bytes | `src/memory.ts` |
+| 7 | Lower `NODE` below 512 bytes. 128-byte lines were too short to be useful | `src/memory.ts` |
 | 8 | Log model thoughts | `src/transcript.ts` |
-| 9 | Put volatile content (dates, state) in the system prompt or tool definitions. They stay byte-identical across calls (§7.2) | `src/index.ts`, `src/tools.ts` |
-| 10 | Use 1-hour cache entries or keep-alive pings (§8) | `src/cache.ts` |
+| 9 | Put volatile content (dates, state) in the system prompt or tool definitions. They stay byte-identical across the calls of a session (§7.2) | `src/index.ts`, `src/tools.ts` |
+| 10 | Use 1-hour cache entries or keep-alive pings (§8). Pi's cache warming is off and the compactor uses short retention | `src/index.ts`, `src/agents.ts`, `src/compactor.ts` |
 | 11 | Carry conversation across turns. Each user message starts a fresh call: system prompt, view, new message (§7) | `src/transcript.ts` |
 | 12 | Use exponential backoff in the compactor. A failed node waits 10 s and retries forever (§4.1) | `src/memory.ts` |
 | 13 | Write without fsync, or let two processes write one profile. The profile lock is a Unix socket (§2) | `src/memory.ts`, `src/profiles.ts` |
@@ -66,10 +66,14 @@ The recipe's checklist (§11), with where this code enforces each item:
 Accepted deviations from the recipe:
 
 - Pi is the host: its TUI, sessions, and SDK replace the recipe's own harness.
-- Profiles give separate memories and instructions.
-- Import adapters for Claude Code, Codex, and ChatGPT keep user messages and final replies (§10).
+- Pi's prompt sections (global and repository `AGENTS.md` files, skills, working directory) follow the recipe's preamble, so the system prompt depends on where Pi runs.
+- Subagents also get `tell_parent`, to reach the main agent while they run.
+- Profiles, the inspector, the usage ledger, and import are additions. Import keeps user messages and final replies, as the recipe's reference did (§10), through adapters for Claude Code conversations and memories, Codex, and ChatGPT.
 - OpenAI requests send no `prompt_cache_breakpoint`, because the gpt-5.6 models reject it with a 400 error. The view relies on implicit prefix caching.
 - `tell` to a finished subagent resumes it with its earlier conversation (from upstream 0.6.6).
+- Not done: computer use and hosting on an always-on machine.
+
+The README section "How it differs from the recipe" describes these for users. Keep it in sync with this list.
 
 ## Keep the fork's design
 
@@ -80,13 +84,12 @@ Upstream deviates from the recipe in several places. This fork keeps the recipe'
 | Turn context | The view and the new message only (recipe §7, checklist item 11). `src/transcript.ts` has no previous exchange | The view plus the last exchange (`previousExchange`, `RUN_BOUNDARY`) |
 | `settle` | Waits until every view line is a summary (§6) | Also waits until the view fits its budget |
 | Who delegates | Only the main agent. Subagents get `zoom`, `date`, and `tell_parent`, with no `spawn` or `tell` (§9) | Subagents delegate two more levels; a parent waits for its children |
-| Reports | One spawn, one report: all its subagents' reports reach the main agent as one message (§9) | Each child reports as soon as it finishes |
+| Reports | One spawn, one report: the final reports of all its subagents reach the main agent as one message (§9). `tell_parent` messages and a resumed subagent's report arrive on their own | Each child reports as soon as it finishes |
 | `tell_parent` | Always reaches the main agent | Reaches the direct parent |
-| Windows | One Pi window per profile, meant to stay open. A second window on a busy profile gets **Back** only | Connected windows, `/tell-main`, `/complete`, and handoff summaries |
-| Tab title | Main window only (`src/title.ts`) | Per-window titles and status states |
+| Windows | One Pi window per profile, meant to stay open, with a tab title for the main window only (`src/title.ts`). On a busy profile, a new session gets only **Back**, and a resumed session gets an error | Connected windows, `/tell-main`, `/complete`, handoff summaries, and per-window titles and status states |
 | OpenAI | `reasoning.context: "all_turns"` (§8). The compactor uses session id `optchat-compactor` over SSE, so its calls share one cache key | No OpenAI settings |
-| `SCALE` | A realistic, dense, multi-item line of exactly 512 bytes, tagged with every kind, with no ids or numbers (§4.2). `test/memory.test.ts` checks it | A shorter line padded with dots |
-| Import | Claude Code slash-command and shell-command output is dropped; typed commands stay as `/name args` or `!command`. Header: `[Historical <source> · YYYY-MM-DD HH:MMZ · <first 13 characters of the id> · <title>]` | XML wrappers imported as user messages; full id and millisecond timestamp in the header |
+| `SCALE` | A realistic, dense, multi-item line of exactly 512 bytes, tagged with `user`, `talk`, `tool`, `echo`, and `work`, with no ids or numbers (§4.2). `test/memory.test.ts` checks it | A shorter line padded with dots |
+| Import | Claude Code slash-command and shell-command output is dropped; typed commands stay as `/name args` or `!command`. A slash command without arguments is dropped and never becomes the title. Conversation header: `[Historical <source> · YYYY-MM-DD HH:MMZ · <first 13 characters of the id> · <title>]`; the full id stays in the structured origin | XML wrappers imported as user messages; full id and millisecond timestamp in the header |
 
 [FORK.md](FORK.md) describes each difference for users. Keep this table and FORK.md in sync.
 
@@ -119,7 +122,8 @@ A fix that suits both designs can go upstream. Show the user the diff and the PR
 - `npm test` runs the test suite. It makes no model calls. Run one file with `npx tsx --test test/memory.test.ts`.
 - If you create or modify a test file, run it and iterate until it passes.
 - A regression test must fail when its fix is reverted. Revert the fix, run the test, and confirm it fails rather than hangs.
-- Tests use a temporary `OPTCHAT_HOME`. Never read or write real profiles in `~/.optchat`, and never modify `~/.pi`, `~/.claude`, or `~/.codex`. Import reads those last three and must not change them.
+- Tests that touch profiles set a temporary `OPTCHAT_HOME`, and tests that open Pi sessions set a temporary `PI_CODING_AGENT_DIR`. Do the same in new tests. Never read or write real profiles in `~/.optchat`.
+- Never modify `~/.pi`, `~/.claude`, or `~/.codex`. Import reads `~/.claude` and `~/.codex`, and subagents read `~/.pi` through Pi.
 - Write ad-hoc scripts to a temporary file, run them, and remove them when done. Don't embed multi-line scripts in shell commands.
 - CI (`.github/workflows/check.yml`) runs `npm ci --ignore-scripts`, `npm run check`, `npm test`, and `npm pack --dry-run`.
 
@@ -134,7 +138,7 @@ A fix that suits both designs can go upstream. Show the user the diff and the PR
 
 The user's always-on Pi loads this extension from the main checkout. Switching branches there changes the code that Pi runs.
 
-- Keep the main checkout on `main` and clean. Work in a git worktree beside it: `git worktree add ../pi-optchat-<branch> -b <branch> origin/main`, then symlink `node_modules` from the main checkout.
+- Keep the main checkout on `main` and clean. Work in a git worktree beside it, such as `git worktree add ../pi-optchat-<name> -b <branch> origin/main`, then symlink `node_modules` from the main checkout.
 - After a merge, run `git pull --ff-only` in the main checkout, then remove the worktree and delete the local and remote branch. Pi loads the new code when it restarts. A paused import resumes from its staging file.
 - Commit only when the user asks.
 - Commit only files you changed in this session. Stage explicit paths (`git add <path>`). Never `git add -A` or `git add .`.
