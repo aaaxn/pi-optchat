@@ -9,7 +9,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import ts from 'typescript';
-import { Memory, localDay, type Compressor } from '../src/memory.ts';
+import { Memory, localDay, type Compression, type Compressor } from '../src/memory.ts';
 import { record } from '../src/cache.ts';
 import { adapters, readConversation, timestamp, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
 import { prepareImport, runImport, memoryDirectory, pendingImport, discardImport, deduplicate, chronological } from '../src/import/job.ts';
@@ -350,6 +350,7 @@ test('append activates only after complete indexing, retains original summaries,
     assert.deepEqual(activated.node({ l: 0, i: 0 }), original);
     assert.equal(activated.root[0].text, 'original exact message');
     assert.equal(activated.root[1].receipt, 'import:one');
+    assert.deepEqual(activated.root[1].origin, entry('one').origin);
     assert.match(activated.zoom(1, 1), /Imported one/);
     assert.deepEqual(deduplicate(activated.root, [entry('one')]), { added: [], skipped: 1 });
     assert.ok(existsSync(join(dir, 'main')));
@@ -392,6 +393,25 @@ test('discard leaves original memory active and a completed pointer swap can fin
     assert.equal(memoryDirectory(dir), join(dir, job.target));
     assert.ok(existsSync(join(dir, 'imports', `${job.id}.json`)));
   } finally { await old.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('an import gives the compactor the same inputs as a live chat that sent the messages one at a time (recipe §10)', async () => {
+  // 300 lines of 500 bytes overflow the view, so merges run while later messages still wait to be summarized.
+  const dir = temp(), live = temp(), old = new Memory(dir, short);
+  const imported = Array.from({ length: 300 }, (_, i) => entry(`m${i}`, date, `${i} ${'imported detail '.repeat(40)}`));
+  const record = (calls: string[]) => async (input: Compression) => { calls.push(JSON.stringify([input.merge, input.source, input.context])); return input.source.slice(0, 500); };
+  const fromImport: string[] = [], fromChat: string[] = [];
+  let chat: Memory | undefined;
+  try {
+    await old.close();
+    assert.ok(prepareImport(dir, old, imported, 'append'));
+    await runImport(dir, record(fromImport), AbortSignal.timeout(20000));
+    chat = new Memory(live, record(fromChat), () => {});
+    for (const e of imported) { chat.append(e.kind, e.text, e.date, e.receipt); await chat.settle(AbortSignal.timeout(20000)); }
+    await chat.settle(AbortSignal.timeout(20000), true);
+    assert.ok(fromChat.some(call => call.startsWith('[true')), 'the view overflowed and merged');
+    assert.deepEqual(fromImport.sort(), fromChat.sort());
+  } finally { await chat?.close(); rmSync(dir, { recursive: true, force: true }); rmSync(live, { recursive: true, force: true }); }
 });
 
 test('chronological rebuild keeps imported conversations and native turns together', () => {
