@@ -16,6 +16,6 @@ The source remains upstream rather than duplicating the full article here. Its f
 - `src/transcript.ts`: builds the context of a parent run (view plus new input), current-run tool loop retained.
 - `src/turn.ts`: the state of a parent run. It waits in `settle` until every view line is a summary, captures the view once per run, logs each message, and journals pending subagent reports.
 - `src/agents.ts`: asynchronous Pi SDK children and automatic completion reports.
-- `src/import/`: profile-scoped historical imports retain user messages and final assistant replies, following the lighter history described in recipe section 10. Source adapters (one table in `src/import/sources.ts`), final-reply detection, replay and scaffolding filtering, and ChatGPT branch labels are integration choices. Live-chat tool logging remains unchanged.
+- `src/import/`: profile-scoped historical imports retain user messages and final assistant replies, following the lighter history described in recipe section 10. An import hands `Memory` one message at a time, each once the one before it is summarized, so the compactor sees the view a live chat would have shown it. Source adapters (one table in `src/import/sources.ts`), final-reply detection, replay and scaffolding filtering, and ChatGPT branch labels are integration choices. Live-chat tool logging remains unchanged.
 
 Profiles, native Pi UI, conversation import, and local Git checkpoints are integration choices described in the README.

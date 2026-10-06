@@ -12,6 +12,8 @@ export interface ImportJob {
   added: number; skipped: number; total: number; inputBytes: number;
 }
 const pendingFile = (dir: string) => join(dir, 'imports', 'pending.json');
+// The whole planned log. `main/` holds only the part already given to Memory, so resume continues from its length.
+const STAGED = 'staged.jsonl';
 function generationPath(dir: string, name: string) {
   if (name !== '.' && !/^memories\/[a-f0-9-]{36}$/.test(name)) throw new Error('Invalid memory generation path.');
   return join(dir, name);
@@ -68,8 +70,10 @@ export function prepareImport(dir: string, old: Memory, incoming: readonly Impor
   // Append copies existing summaries without changing their indices. Rebuild regenerates every node.
   const all = mode === 'rebuild' ? chronological([...old.root, ...added]) : [...old.root, ...chronological(added)];
   const entries: Entry[] = all.map((e, i) => ({ ...e, i, size: bytes(`${e.kind}: ${e.text}`) }));
-  mkdirSync(join(path, 'tree'), { recursive: true, mode: 0o700 });
-  atomicWrite(join(path, 'main', '000-import.jsonl'), entries.map(e => JSON.stringify(e)).join('\n') + '\n');
+  const kept = mode === 'append' ? old.root.length : 0;
+  for (const sub of ['main', 'tree']) mkdirSync(join(path, sub), { recursive: true, mode: 0o700 });
+  if (kept) atomicWrite(join(path, 'main', '000-import.jsonl'), entries.slice(0, kept).map(e => JSON.stringify(e)).join('\n') + '\n');
+  atomicWrite(join(path, STAGED), entries.map(e => JSON.stringify(e)).join('\n') + '\n');
   if (mode === 'append') cpSync(join(old.directory, 'tree'), join(path, 'tree'), { recursive: true });
   const job: ImportJob = { id, mode, previous: relative(dir, old.directory) || '.', target,
     created: new Date().toISOString(), added: added.length, skipped, total: entries.length,
@@ -88,12 +92,17 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
   progress: (state: ImportProgress) => void = () => {}): Promise<ImportJob> {
   const job = pendingImport(dir); if (!job) throw new Error('No pending import.');
   const path = generationPath(dir, job.target);
-  if (!existsSync(join(path, 'main', '000-import.jsonl'))) throw new Error('Import staging data is missing; original memory remains intact.');
+  if (!existsSync(join(path, STAGED))) throw new Error('Import staging data is missing; original memory remains intact.');
+  const plan: Entry[] = readFileSync(join(path, STAGED), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
   const memory = new Memory(path, compress, () => {});
-  const report = () => progress({ messages: memory.root.length - memory.pending, total: memory.root.length, summaries: memory.tree.size, error: memory.lastError });
+  const report = () => progress({ messages: memory.root.length - memory.pending, total: plan.length, summaries: memory.tree.size, error: memory.lastError });
   const timer = setInterval(report, 500);
   try {
-    report(); await memory.settle(signal, true); signal.throwIfAborted();
+    if (memory.root.length > plan.length || memory.root.some((e, i) => e.text !== plan[i].text)) throw new Error('Import staging data does not match its log; original memory remains intact.');
+    report();
+    // Recipe §10: imported messages are compressed like any other, so each arrives once the one before it is summarized, as in a live chat.
+    for (const e of plan.slice(memory.root.length)) { await memory.settle(signal); memory.append(e.kind, e.text, e.date, e.receipt, e.origin); }
+    await memory.settle(signal, true); signal.throwIfAborted();
     // Close all writers before the single atomic pointer swap. The previous generation stays intact.
     await memory.close();
     atomicWrite(join(dir, 'imports', `${job.id}.json`), JSON.stringify({ ...job, completed: new Date().toISOString() }, null, 2));
