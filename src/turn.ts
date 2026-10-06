@@ -120,9 +120,11 @@ export class Turn {
       if (this.failure) throw new Error(this.failure);
       if (this.run.view === undefined) {
         ctx.ui.setWorkingMessage('Waiting for OptChat summaries…');
-        await p.memory.settle(ctx.signal);
-        this.run.view = p.memory.render(); // Capture old history before logging the new input.
-        this.flush(); ctx.ui.setWorkingMessage();
+        try {
+          await p.memory.settle(ctx.signal);
+          this.run.view = p.memory.render(); // Capture old history before logging the new input.
+          this.flush();
+        } finally { ctx.ui.setWorkingMessage(); }
       }
       return buildContext(messages, this.run.messages, this.run.view, this.prompt);
     } catch (error) {

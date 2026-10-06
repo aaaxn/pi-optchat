@@ -4,12 +4,17 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { AssistantMessage, ToolResultMessage, UserMessage } from '@earendil-works/pi-ai';
+import { createAssistantMessageEventStream, type AssistantMessage, type Context, type ToolResultMessage, type UserMessage } from '@earendil-works/pi-ai';
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
+import optchat from '../src/index.ts';
 import { Inbox } from '../src/inbox.ts';
 import { isView, Memory, type Compressor } from '../src/memory.ts';
+import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
+import { COMPACT } from '../src/prompts.ts';
 import { REPORT_TYPE } from '../src/transcript.ts';
 import { NEEDS_PROFILE, Turn, type TurnContext } from '../src/turn.ts';
 import { emptyUsage } from '../src/usage.ts';
+import { fakeProvider, fakeRuntime } from './fakes.ts';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const user = (text: string): UserMessage => ({ role: 'user', content: text, timestamp: 1 });
@@ -58,6 +63,23 @@ test('a turn waits until every view line is a summary, then sends the view (chec
     assert.match(sentText, /SUMMARY OF THE EARLIER MESSAGE/);
     assert.doesNotMatch(sentText, /a decision worth keeping/);
   } finally { release.run?.(); await f.done(); }
+});
+
+test('an aborted wait for summaries clears the working message and refuses the turn (B4-F)', async () => {
+  const f = await fixture((_input, signal) => new Promise<string>((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('closed')))));
+  try {
+    f.memory.append('user', LONG);
+    f.turn.start();
+    f.turn.messageEnd(user('Now?'), f.ctx);
+    const pending = f.turn.context([], f.ctx, noImport);
+    await sleep(20);
+    f.controller.abort();
+    const messages = await pending;
+    assert.deepEqual(f.working, ['Waiting for OptChat summaries…', undefined], 'the message is cleared although the wait threw');
+    assert.deepEqual(messages.map(m => m.role), ['system']);
+    assert.equal(f.aborts(), 1);
+    assert.deepEqual(f.notices, ['Memory wait cancelled.']);
+  } finally { await f.done(); }
 });
 
 test('the context holds the view and the current run only, and the view stays fixed during the run (checklist 11)', async () => {
@@ -248,4 +270,45 @@ test('the context is refused without a profile and while an import runs', async 
     assert.equal(f.aborts(), 2);
     assert.equal(f.memory.root.length, 1, 'the refused turn still logs what it received');
   } finally { await f.done(); }
+});
+
+test('Escape while Pi waits for summaries leaves no stale working message', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-turn-pi-'));
+  const oldHome = process.env.OPTCHAT_HOME; process.env.OPTCHAT_HOME = dir;
+  const messages: (string | undefined)[] = [];
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  const watchdog = setTimeout(() => { void session?.abort(); }, 15_000);
+  try {
+    createProfile('fixture');
+    const config = loadConfig(profilePath('fixture'));
+    saveConfig(profilePath('fixture'), { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    const runtime = await fakeRuntime(dir, fakeProvider((model, context: Context, options) => {
+      const reply: AssistantMessage = { ...answer([{ type: 'text', text: 'Done.' }]), api: model.api, provider: model.provider, model: model.id };
+      const stream = createAssistantMessageEventStream();
+      if (context.messages.some(m => m.role === 'system' && m.content === COMPACT)) {
+        stream.push({ type: 'start', partial: reply });
+        options?.signal?.addEventListener('abort', () => { stream.push({ type: 'error', reason: 'aborted', error: { ...reply, stopReason: 'aborted' } }); stream.end(); });
+      } else queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); });
+      return stream;
+    }, { model: 'fixture' }), 'fixture');
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager, noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.create(dir, join(dir, 'sessions'));
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom'] })).session;
+    const ui = { ...session.extensionRunner.getUIContext(), setTitle: () => {}, setWorkingMessage: (message?: string) => { messages.push(message); } } as ExtensionUIContext;
+    await session.bindExtensions({ uiContext: ui });
+    await session.prompt(LONG + LONG); await session.agent.waitForIdle();
+    const second = session.prompt('second');
+    for (let wait = 0; wait < 300 && messages.filter(Boolean).length < 2; wait++) await sleep(10);
+    assert.equal(messages.filter(Boolean).length, 2, 'the second turn is waiting for summaries');
+    await session.abort(); await Promise.allSettled([second]); await session.agent.waitForIdle();
+    assert.equal(messages.at(-1), undefined, `the working message was left as ${JSON.stringify(messages.at(-1))}`);
+  } finally {
+    clearTimeout(watchdog);
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
