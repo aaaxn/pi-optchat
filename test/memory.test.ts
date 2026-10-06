@@ -469,3 +469,19 @@ test('cap never cuts a surrogate pair in half', () => {
     assert.equal(claimed, text.length - head.length - tail.length);
   }
 });
+
+test('view size counts the flattened text that render emits, for new and reloaded summaries', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-flat-'));
+  const measured = (memory: Memory) => memory.render().split('\n').slice(1, -1)
+    .reduce((n, line) => n + bytes(line.slice(line.indexOf('|') + 1)), 0);
+  let memory = new Memory(dir, async () => 'x');
+  try {
+    memory.append('user', 'a\r\n\r\n\r\nb\n\n\nc');
+    assert.equal(memory.size, measured(memory), 'built from the entry');
+    await memory.settle(AbortSignal.timeout(2000), true);
+    assert.equal(memory.size, measured(memory));
+    await memory.close();
+    memory = new Memory(dir, async () => 'x');
+    assert.equal(memory.size, measured(memory), 'loaded from the tree');
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});

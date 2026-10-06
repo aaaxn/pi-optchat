@@ -19,6 +19,7 @@ export const end = (part: Part) => start(part) + 2 ** part.l;
 export const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
 const UNBUILT_BYTES = bytes(UNBUILT);
 export const flat = (s: string) => s.replace(/[\r\n]+/g, ' ');
+const lineBytes = (s: string) => bytes(flat(s));
 const VIEW_OPEN = '<chat>\n';
 export const isView = (text: string) => text.startsWith(VIEW_OPEN);
 const notice = (omitted: number) => `\n[${omitted} characters omitted; head and tail retained]\n`;
@@ -105,7 +106,7 @@ export class Memory {
       if (!isSummary(value) || value.l < 0 || value.i < 0 || end(value) > this.root.length)
         throw new Error('Invalid OptChat summary record.');
       if (value.l === 0 && !this.tree.has(key(value))) this.leaves++;
-      this.tree.set(key(value), { ...value, size: bytes(value.text) });
+      this.tree.set(key(value), { ...value, size: lineBytes(value.text) });
     }
     // Fold history in order; do not retile the entire log on each turn.
     for (let i = 0; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
@@ -205,7 +206,7 @@ export class Memory {
       historical: this.root.slice(start(part), end(part)).some(entry => !!entry.origin) }, this.controller.signal)).trim();
     if (this.stopped) return;
     if (!text) throw new Error('Compactor returned an empty summary.');
-    const node = { ...part, text, size: bytes(text) };
+    const node = { ...part, text, size: lineBytes(text) };
     appendJson(join(this.directory, 'tree', `${localDay()}.jsonl`), node);
     this.tree.set(key(part), node); this.retryAt.delete(key(part));
     // A leaf is usually still in the view when built, but after a damaged tree file a saved parent can already hide it.
