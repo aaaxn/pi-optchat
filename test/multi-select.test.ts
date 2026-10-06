@@ -1,3 +1,4 @@
+import './support.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { visibleWidth } from '@earendil-works/pi-tui';

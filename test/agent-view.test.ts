@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { ModelRuntime, SessionManager, initTheme } from '@earendil-works/pi-coding-agent';
 import { TuiMainScreen, visibleWidth, type Terminal, type TuiMouseEvent } from '@earendil-works/pi-tui';
@@ -11,7 +12,6 @@ import { AgentView, TranscriptView } from '../src/agent-view.ts';
 import { textContent } from '../src/transcript.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { emptyUsage } from '../src/usage.ts';
-import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 
 initTheme('dark', false);
 

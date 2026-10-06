@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import { fakeProvider, fakeRuntime } from './fakes.ts';
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type ToolResultMessage, type UserMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
@@ -14,7 +15,6 @@ import { COMPACT } from '../src/prompts.ts';
 import { REPORT_TYPE } from '../src/transcript.ts';
 import { NEEDS_PROFILE, Turn, type TurnContext } from '../src/turn.ts';
 import { emptyUsage } from '../src/usage.ts';
-import { fakeProvider, fakeRuntime } from './fakes.ts';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const user = (text: string): UserMessage => ({ role: 'user', content: text, timestamp: 1 });

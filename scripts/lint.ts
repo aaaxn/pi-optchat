@@ -16,6 +16,8 @@ const exceptions: Exception[] = [
 const lineOf = (sf: ts.SourceFile, pos: number) => sf.getLineAndCharacterOfPosition(pos).line;
 const emptyBlock = (node: ts.Node) => ts.isBlock(node) && node.statements.length === 0;
 
+const importSources = [...readFileSync(join(import.meta.dirname, '../src/memory.ts'), 'utf8').match(/interface Origin \{ source: ([^;]*);/)?.[1].matchAll(/'([^']+)'/g) ?? []].map(match => match[1]);
+
 const rules: Rule[] = [
   { name: 'import-guidance-owner', exempt: /^(src\/(profiles|compactor)\.ts|test\/fork\.test\.ts)$/, message: 'Agent instructions come from agentInstructions() in src/profiles.ts.',
     hit: node => ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && /(^|\/)guidance(\.ts)?$/.test(node.moduleSpecifier.text) },
@@ -30,6 +32,21 @@ const rules: Rule[] = [
   { name: 'run-state-owner', exempt: /^src\/runs\.ts$/, message: 'Run state changes only through transition() in src/runs.ts.',
     hit: node => ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
       && ts.isPropertyAccessExpression(node.left) && node.left.name.text === 'state' },
+  { name: 'test-sandbox', exempt: /^(?!test\/[^/]+\.test\.ts$)|^test\/support\.test\.ts$/, message: "A test file imports './support.ts' (or './fakes.ts') before any import from ../src/ or @earendil-works/, so a single-file run is sandboxed from the real home. Put `import './support.ts';` before them.",
+    hit: node => {
+      if (!ts.isSourceFile(node)) return false;
+      const modules = node.statements.filter(ts.isImportDeclaration).filter(statement => !statement.importClause?.isTypeOnly).map(statement => ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : '');
+      const sandbox = modules.findIndex(name => ['./support.ts', './fakes.ts'].includes(name)), loads = modules.findIndex(name => name.startsWith('../src/') || name.startsWith('@earendil-works/'));
+      return sandbox < 0 || loads >= 0 && loads < sandbox;
+    } },
+  { name: 'source-branch', exempt: /^src\/import\/sources\.ts$/, message: 'Per-source behavior lives in the adapter table in src/import/sources.ts.',
+    hit: node => {
+      const isSource = (n: ts.Node) => ts.isPropertyAccessExpression(n) && n.name.text === 'source';
+      const isName = (n: ts.Node) => ts.isStringLiteralLike(n) && importSources.includes(n.text);
+      const equality = [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken];
+      return ts.isBinaryExpression(node) && equality.includes(node.operatorToken.kind) && [node.left, node.right].some(isSource) && [node.left, node.right].some(isName)
+        || ts.isCaseClause(node) && isName(node.expression) && isSource(node.parent.parent.expression);
+    } },
 ];
 
 const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
@@ -51,6 +68,7 @@ for (const file of ['src', 'test'].flatMap(dir => walk(join(root, dir)))) {
 
 let failed = false;
 const fail = (line: string) => { failed = true; console.log(line); };
+if (!importSources.length) fail('scripts/lint.ts: cannot read the import source names from Origin in src/memory.ts, so the source-branch rule would check nothing.');
 const pairs = new Set([...hits.map(hit => `${hit.file}\t${hit.rule.name}`), ...exceptions.map(entry => `${entry.file}\t${entry.rule}`)]);
 for (const pair of pairs) {
   const [file, name] = pair.split('\t');

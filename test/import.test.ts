@@ -1,14 +1,17 @@
+import './support.ts';
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, utimesSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import ts from 'typescript';
 import { Memory, localDay, type Compressor } from '../src/memory.ts';
-import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
+import { record } from '../src/cache.ts';
+import { adapters, readConversation, timestamp, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
 import { prepareImport, runImport, memoryDirectory, pendingImport, discardImport, deduplicate, chronological } from '../src/import/job.ts';
 import { chooseImport, showProgress } from '../src/import/ui.ts';
 
@@ -47,7 +50,7 @@ test('Claude imports user messages and final replies, omitting tool loops and re
 
 test('Claude slash commands keep only typed arguments, local command output is dropped, and headers stay short', async () => {
   const dir = temp(), file = join(dir, 'claude.jsonl');
-  const user = (uuid: string, content: string) => ({ type: 'user', uuid, sessionId: 'session-1', cwd: '/synthetic', timestamp: date, message: { role: 'user', content } });
+  const user = (uuid: string, content: string) => ({ type: 'user', uuid, sessionId: 'cbcb64a5-871a-4179-a897-e3683852d011', cwd: '/synthetic', timestamp: date, message: { role: 'user', content } });
   const reply = (uuid: string, text: string) => ({ type: 'assistant', uuid, timestamp: date, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text }] } });
   lines(file, [
     user('compact', '<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>'),
@@ -70,7 +73,7 @@ test('Claude slash commands keep only typed arguments, local command output is d
     // The receipt hashes the raw command, so a command imported before this filter is still recognized.
     const raw = '<command-message>oreo-mode</command-message>\n<command-name>/oreo-mode</command-name>\n<command-args>ship the parser fix</command-args>';
     assert.equal(parsed.entries[1].receipt, `import:${createHash('sha256').update(JSON.stringify(['claude', source.id, 'skill', 'user', raw])).digest('hex')}`);
-    const scan = await scanLocal('claude', [dir]);
+    const scan = await adapters.claude.scan(dir);
     assert.equal(scan.conversations[0].title, '!git status', 'a bare command never becomes the title');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -166,7 +169,7 @@ test('Codex discovery and parsing exclude delegated sessions while keeping user 
   lines(parent, [metadata('cli'), request]);
   lines(child, [metadata({ subagent: { thread_spawn: { parent_thread_id: 'session' } } }), request]);
   try {
-    const scan = await scanLocal('codex', [dir]);
+    const scan = await adapters.codex.scan(dir);
     assert.deepEqual(scan.conversations.map(c => c.file), [parent]);
     assert.equal((await readConversation(conversation('codex', child))).entries.length, 0);
     assert.equal((await readConversation(scan.conversations[0])).entries.length, 1);
@@ -186,7 +189,7 @@ test('ChatGPT keeps user messages and final replies on each branch with stable i
   } };
   writeFileSync(file, JSON.stringify([exported]));
   try {
-    const scan = await scanChatGPT(dir); assert.equal(scan.conversations.length, 1);
+    const scan = await adapters.chatgpt.scan(dir); assert.equal(scan.conversations.length, 1);
     const parsed = await readConversation(scan.conversations[0]);
     const msgs = parsed.entries.filter(e => e.origin?.message !== 'export:selected-branch');
     assert.deepEqual(msgs.map(e => e.origin?.message), ['u', 'f', 'alt']);
@@ -214,15 +217,15 @@ test('Claude discovery keeps the parent conversation and skips modern, legacy, a
   lines(join(workflow, 'journal.jsonl'), [{ type: 'started', agentId: 'a' }, { type: 'result', result: 'workflow metadata' }]);
   lines(join(workflow, 'conversation.jsonl'), [user]);
   try {
-    const scan = await scanLocal('claude', [dir]);
-    assert.deepEqual(scan.conversations.map(c => c.id), ['shared']);
+    const scan = await adapters.claude.scan(dir);
+    assert.deepEqual(scan.conversations.map(c => c.id), ['session']);
     assert.deepEqual(scan.conversations.map(c => c.file), [parent]);
     assert.ok(scan.conversations.every(c => c.project === '/project' && c.date === date));
     const parsed = await readConversation(scan.conversations[0]);
     assert.equal(parsed.entries.length, 2);
     assert.match(parsed.entries[1].text, /Child reported useful findings/);
     assert.deepEqual(scan.warnings, []);
-    await assert.rejects(scanLocal('claude', [dir], AbortSignal.abort()));
+    await assert.rejects(adapters.claude.scan(dir, AbortSignal.abort()));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -233,7 +236,7 @@ test('Claude discovery checks late sidechain markers without extending metadata 
   lines(parent, [user, ...metadata.slice(1), { type: 'custom-title', sessionId: 'later', cwd: '/later', customTitle: 'Later title' }]);
   lines(child, [...metadata, { ...user, isSidechain: true }]);
   try {
-    const scan = await scanLocal('claude', [dir]);
+    const scan = await adapters.claude.scan(dir);
     assert.deepEqual(scan.conversations.map(c => c.file), [parent]);
     const { id, project, title, date: foundDate } = scan.conversations[0];
     assert.deepEqual({ id, project, title, date: foundDate }, { id: 'parent', project: '/project', title: 'Parent request', date });
@@ -244,7 +247,7 @@ test('Claude discovery checks late sidechain markers without extending metadata 
     writeFileSync(parent, [JSON.stringify({ type: 'session_meta', payload: { id: 'codex-parent', cwd: '/project', source: 'cli', timestamp: date } }),
       ...metadata.slice(1).map(value => JSON.stringify(value)), 'not JSON'].join('\n') + '\n');
     rmSync(child);
-    const codex = await scanLocal('codex', [dir]);
+    const codex = await adapters.codex.scan(dir);
     assert.deepEqual(codex.conversations.map(c => c.id), ['codex-parent']);
     assert.deepEqual(codex.warnings, []);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -261,7 +264,7 @@ test('discovery continues when listed files disappear before stat or stream open
   });
   syncBuiltinESMExports();
   try {
-    const scan = await scanLocal('claude', [dir]);
+    const scan = await adapters.claude.scan(dir);
     assert.deepEqual(scan.conversations.map(c => c.file), [first]);
     assert.equal(scan.warnings.length, 2);
     assert.ok(scan.warnings.some(w => w.includes(beforeStat)));
@@ -274,7 +277,7 @@ test('a selected transcript disappearing warns without importing it; cancellatio
   const dir = temp(), file = join(dir, 'selected.jsonl');
   try {
     lines(file, [{ type: 'user', uuid: 'u', message: { role: 'user', content: 'selected conversation' } }]);
-    const scan = await scanLocal('claude', [dir]);
+    const scan = await adapters.claude.scan(dir);
     rmSync(file);
     for (const source of ['claude', 'codex'] as const) {
       const parsed = await readConversation({ ...scan.conversations[0], source });
@@ -295,7 +298,7 @@ test('ChatGPT ZIP reads numbered conversation files without extracting other arc
   } }]));
   try {
     execFileSync('zip', ['-q', zip, 'conversations_1.json'], { cwd: dir }); rmSync(file);
-    const scan = await scanChatGPT(zip); assert.equal(scan.conversations.length, 1);
+    const scan = await adapters.chatgpt.scan(zip); assert.equal(scan.conversations.length, 1);
     const parsed = await readConversation(scan.conversations[0]); assert.equal(parsed.entries.length, 1);
     assert.match(parsed.entries[0].text, /zip fixture message/); assert.equal(existsSync(file), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -313,7 +316,7 @@ test('Claude memories import each topic file once as a dated note, and an edited
   writeFileSync(pr, '---\nname: PR status\ndescription: Tracking PR\nmetadata:\n  type: project\n---\nPR #7023 is open.\n');
   utimesSync(pr, new Date(date), new Date(date));
   try {
-    const scan = await scanClaudeMemories(root);
+    const scan = await adapters['claude-memory'].scan(root);
     assert.deepEqual(scan.warnings, []);
     const read = async () => (await Promise.all(scan.conversations.map(c => readConversation(c)))).flatMap(p => p.entries);
     const first = await read();
@@ -422,4 +425,267 @@ test('preparation source dialog receives shutdown cancellation before staging an
     const task = chooseImport({ ui }, 'test', memory, 'fixture', controller.signal); controller.abort();
     assert.equal(await task, undefined); assert.equal(pendingImport(dir), undefined);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a time without a zone is UTC whatever the machine zone', () => {
+  const zone = process.env.TZ;
+  process.env.TZ = 'America/Sao_Paulo';
+  try {
+    assert.equal(timestamp('2026-01-02T12:00:00', 'x'), '2026-01-02T12:00:00.000Z');
+    assert.equal(timestamp('2026-01-02 12:00', 'x'), '2026-01-02T12:00:00.000Z');
+    assert.equal(timestamp('2026-01-02T12:00:00-03:00', 'x'), '2026-01-02T15:00:00.000Z');
+    assert.equal(timestamp(1767355200, 'x'), '2026-01-02T12:00:00.000Z');
+  } finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }
+});
+
+test('a number is seconds, or milliseconds when it is too large to be seconds', () => {
+  assert.equal(timestamp(1767261600.5, 'x'), '2026-01-01T10:00:00.500Z');
+  assert.equal(timestamp(1767261600123, 'x'), '2026-01-01T10:00:00.123Z');
+});
+
+test('an out-of-range or invalid time falls back without throwing', () => {
+  for (const bad of [1e16, -1e16, NaN, Infinity, 'not a time', undefined, null]) assert.equal(timestamp(bad, 'fallback'), 'fallback');
+});
+
+test('a ChatGPT conversation with an empty or multi-line title gets a one-line header that falls back to its id', async () => {
+  const dir = temp(), file = join(dir, 'conversations.json');
+  const chat = (id: string, title: unknown) => ({ id, title, create_time: 1767355200, mapping: {
+    u: { parent: null, message: { id: 'm', author: { role: 'user' }, create_time: 1767355200, content: { parts: ['hi'] } } } } });
+  writeFileSync(file, JSON.stringify([chat('abc-def-ghi-jkl-mno', ''), chat('blank-title-0000-0000', '  \n '), chat('long-title-1111-1111', 'First line\nsecond   line ' + 'x'.repeat(200)), chat('missing-title-2222', undefined), chat('edge-title-3333-3333', 'a'.repeat(109) + ' b')]));
+  try {
+    const scan = await adapters.chatgpt.scan(dir);
+    const headers = new Map<string, string>();
+    for (const c of scan.conversations) headers.set(c.id, (await readConversation(c)).entries[0].text.split('\n')[0]);
+    assert.equal(headers.get('abc-def-ghi-jkl-mno'), '[Historical chatgpt · 2026-01-02 12:00Z · abc-def-ghi-j · abc-def-ghi-jkl-mno]');
+    assert.equal(headers.get('blank-title-0000-0000'), '[Historical chatgpt · 2026-01-02 12:00Z · blank-title-0 · blank-title-0000-0000]');
+    assert.equal(headers.get('missing-title-2222'), '[Historical chatgpt · 2026-01-02 12:00Z · missing-title · missing-title-2222]');
+    assert.equal(scan.conversations.find(c => c.id === 'edge-title-3333-3333')?.title, 'a'.repeat(109), 'a title cut at a space has no trailing space');
+    const long = headers.get('long-title-1111-1111') ?? '';
+    assert.match(long, /^\[Historical chatgpt · 2026-01-02 12:00Z · long-title-11 · First line second line x+\]$/);
+    assert.ok(long.length < 200);
+    assert.ok(scan.conversations.every(c => c.title && !/\n/.test(c.title)));
+    const origin = (await readConversation(scan.conversations.find(c => c.id === 'abc-def-ghi-jkl-mno')!)).entries[0].origin;
+    assert.equal(origin?.title, 'abc-def-ghi-jkl-mno');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a resumed Claude transcript is listed under its file name, and its copied messages keep the old session key so they import once', async () => {
+  const dir = temp();
+  const user = (uuid: string, session: string, content: string) => ({ type: 'user', uuid, sessionId: session, cwd: '/project', timestamp: date, message: { role: 'user', content } });
+  const reply = (uuid: string, session: string, content: string) => ({ type: 'assistant', uuid, sessionId: session, timestamp: date, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: content }] } });
+  const copied = [user('u1', 'aaaaaaaa-0000', 'q1'), reply('a1', 'aaaaaaaa-0000', 'r1'), user('u2', 'aaaaaaaa-0000', 'q2'), reply('a2', 'aaaaaaaa-0000', 'r2')];
+  lines(join(dir, 'aaaaaaaa-0000.jsonl'), copied);
+  lines(join(dir, 'bbbbbbbb-1111.jsonl'), [...copied, user('u3', 'bbbbbbbb-1111', 'q3'), reply('a3', 'bbbbbbbb-1111', 'r3')]);
+  try {
+    const scan = await adapters.claude.scan(dir);
+    assert.deepEqual(scan.conversations.map(c => c.id).sort(), ['aaaaaaaa-0000', 'bbbbbbbb-1111']);
+    const [old, resumed] = await Promise.all(scan.conversations.sort((x, y) => x.id.localeCompare(y.id)).map(c => readConversation(c)));
+    assert.deepEqual(resumed.entries.map(e => e.origin?.conversation), [...Array(4).fill('aaaaaaaa-0000'), 'bbbbbbbb-1111', 'bbbbbbbb-1111']);
+    assert.match(resumed.entries[0].text, /^\[Historical claude · [^·]*· bbbbbbbb-1111 · q1\]/);
+    const merged = deduplicate([], [...old.entries, ...resumed.entries]);
+    assert.deepEqual(merged.added.map(e => e.text.split('\n')[1]), ['q1', 'r1', 'q2', 'r2', 'q3', 'r3']);
+    assert.equal(merged.skipped, 4);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a Claude record without a sessionId takes the last one seen in the file, and a leading one takes the file name', async () => {
+  const dir = temp();
+  const user = (uuid: string, content: string, session?: string) => ({ type: 'user', uuid, ...(session === undefined ? {} : { sessionId: session }), timestamp: date, message: { role: 'user', content } });
+  const reply = (uuid: string, content: string, session?: string) => ({ type: 'assistant', uuid, ...(session === undefined ? {} : { sessionId: session }), timestamp: date, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: content }] } });
+  lines(join(dir, 'nosess2-4444.jsonl'), [user('u1', 'q1', 'sess-x'), reply('a1', 'r1'), user('u2', 'q2', ''), reply('a2', 'r2')]);
+  lines(join(dir, 'whole-5555.jsonl'), [user('u1', 'q1', 'sess-x'), reply('a1', 'r1', 'sess-x'), user('u2', 'q2', 'sess-x'), reply('a2', 'r2', 'sess-x')]);
+  lines(join(dir, 'lead-6666.jsonl'), [user('u0', 'q0'), reply('a0', 'r0'), user('u1', 'q1', 'sess-y'), reply('a1', 'r1')]);
+  try {
+    const read = async (id: string) => readConversation((await adapters.claude.scan(dir)).conversations.find(c => c.id === id)!);
+    const [mixed, whole, lead] = await Promise.all(['nosess2-4444', 'whole-5555', 'lead-6666'].map(read));
+    assert.deepEqual(mixed.entries.map(e => e.origin?.conversation), Array(4).fill('sess-x'));
+    assert.deepEqual(mixed.entries.map(e => e.receipt), whole.entries.map(e => e.receipt), 'the receipts are the ones a file with every sessionId gives, so a re-import adds nothing');
+    assert.deepEqual(lead.entries.map(e => e.origin?.conversation), ['lead-6666', 'lead-6666', 'sess-y', 'sess-y']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+const codexFixture = new URL('./fixtures/codex-rollout.jsonl', import.meta.url).pathname;
+const receipt = (...identity: unknown[]) => `import:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
+
+test('Codex titles and entries skip the contextual messages Codex injects, and keep what the user typed', async () => {
+  const dir = temp();
+  copyFileSync(codexFixture, join(dir, 'rollout-2026-03-04T09-00-00.jsonl'));
+  try {
+    const scan = await adapters.codex.scan(dir);
+    assert.equal(scan.conversations.length, 1);
+    const [c] = scan.conversations;
+    assert.deepEqual({ id: c.id, project: c.project, title: c.title, date: c.date },
+      { id: '0199c0de-1111-7222-8333-444455556666', project: '/home/dev/synthetic-app', title: 'Add a --dry-run flag to the sync command.', date: '2026-03-04T09:00:02.000Z' });
+    const parsed = await readConversation(c);
+    assert.deepEqual(parsed.entries.map(e => [e.kind, e.origin?.message, e.text.slice(e.text.indexOf(']\n') + 2)]), [
+      ['user', 'msg-1', 'Add a --dry-run flag to the sync command.'],
+      ['talk', 'msg-2', 'Added --dry-run to sync.'],
+      ['user', 'msg-3', 'Now document the flag in the README.'],
+      ['talk', 'msg-4', 'Documented --dry-run in the README.'],
+    ]);
+    assert.equal(parsed.entries[0].text.split('\n')[0], '[Historical codex · 2026-03-04 09:00Z · 0199c0de-1111 · Add a --dry-run flag to the sync command.]');
+    assert.doesNotMatch(JSON.stringify(parsed.entries), /AGENTS\.md|environment_context|user_shell_command|<skill>|hook_prompt|codex_internal_context|turn_aborted|subagent_notification|SECRET|Reading the sync/);
+    assert.deepEqual(parsed.warnings, []);
+    const raw = '<environment_context>\n  <cwd>/home/dev/synthetic-app</cwd>\n</environment_context>\nNow document the flag in the README.';
+    assert.equal(parsed.entries[2].receipt, receipt('codex', c.id, 'msg-3', 'user', raw));
+    assert.equal(parsed.entries[0].receipt, receipt('codex', c.id, 'msg-1', 'user', 'Add a --dry-run flag to the sync command.'));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Codex scaffold drops only the fragments Codex itself marks as injected context', () => {
+  const { scaffold } = adapters.codex;
+  for (const injected of [
+    '# AGENTS.md instructions for /p\n\n<INSTRUCTIONS>\nbe nice\n</INSTRUCTIONS>', '# AGENTS.md instructions\n\n<INSTRUCTIONS>\nx\n</INSTRUCTIONS>',
+    '<environment_context>\n<cwd>/p</cwd>\n</environment_context>', '  <ENVIRONMENT_CONTEXT>x</environment_context>  ', '<skill>\n<name>demo</name>\n</skill>',
+    '<user_shell_command>\n<command>ls</command>\n</user_shell_command>', '<turn_aborted>\ninterrupted\n</turn_aborted>',
+    '<subagent_notification>{}</subagent_notification>', '<hook_prompt hook_run_id="run-1">Retry</hook_prompt>', '<agent_message_board_notification>x</agent_message_board_notification>',
+    '<recommended_plugins>\n- Drive\n</recommended_plugins>', '<codex_internal_context source="extension">\nsteer\n</codex_internal_context>',
+    '<goal_context>\ngo\n</goal_context>', '<external_notes>value</external_notes>',
+    'Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.',
+    'Warning: Your account was flagged for potentially high-risk cyber activity and routed to another model.',
+    'Warning: The maximum number of unified exec processes you can keep open is 60.',
+  ]) assert.equal(scaffold(injected), '', injected);
+  for (const typed of [
+    'fix the parser', '<project_context>\nbody\n</project_context>', '<environment_context>\nno closing tag', 'see the # AGENTS.md instructions for details',
+    '<codex_internal_context source="Extension">\nbody\n</codex_internal_context>', '<hook_prompt>no run id</hook_prompt>', '<external_a>x</external_b>',
+  ]) assert.equal(scaffold(typed), typed, typed);
+  assert.equal(scaffold([{ type: 'input_text', text: '<environment_context>x</environment_context>' }, { type: 'input_text', text: 'real' }, { type: 'input_image' }]),
+    'real\n[image attachment; image bytes are not imported]');
+});
+
+test('a ChatGPT conversation with a very long chain of replies imports in order, and a parent cycle is still rejected', async () => {
+  const nodes = 20_000, mapping: Record<string, unknown> = {};
+  for (let i = nodes - 1; i >= 0; i--) mapping[`n${i}`] = { parent: i ? `n${i - 1}` : null,
+    message: { id: `m${i}`, author: { role: i % 2 ? 'assistant' : 'user' }, end_turn: true, content: { parts: [`message ${i}`] } } };
+  const chat = (exported: Record<string, unknown>) => ({ ...conversation('chatgpt', 'export.json'), exported });
+  const parsed = await readConversation(chat({ mapping, current_node: `n${nodes - 1}` }));
+  assert.equal(parsed.entries.length, nodes + 1);
+  assert.deepEqual(parsed.entries.slice(0, 3).map(e => e.origin?.message), ['m0', 'm1', 'm2']);
+  assert.equal(parsed.entries.at(-1)?.origin?.message, 'export:selected-branch');
+  const loop = { a: { parent: 'b', message: { author: { role: 'user' }, content: { parts: ['a'] } } }, b: { parent: 'a', message: { author: { role: 'user' }, content: { parts: ['b'] } } } };
+  await assert.rejects(readConversation(chat({ mapping: loop })), /cycle in ChatGPT conversation mapping/);
+});
+
+test('a Claude memory with a folded or literal YAML description imports the text, not the indicator', async () => {
+  const root = temp(), memory = join(root, '-tmp-alpha', 'memory'); mkdirSync(memory, { recursive: true });
+  const note = (name: string, description: string) => writeFileSync(join(memory, `${name}.md`), `---\nname: ${name}\n${description}\ntype: user\n---\nbody of ${name}\n`);
+  note('folded', 'description: >\n  a long\n  description: with a colon\n\n  second paragraph');
+  note('literal', 'description: |-\n  first line\n  second line');
+  note('plain', 'description: one line');
+  try {
+    const scan = await adapters['claude-memory'].scan(root);
+    const texts = new Map<string, string[]>();
+    for (const c of scan.conversations) texts.set(c.title, (await readConversation(c)).entries[0].text.split('\n'));
+    assert.deepEqual(texts.get('folded')?.slice(1, 3), ['a long description: with a colon second paragraph', '']);
+    assert.deepEqual(texts.get('literal')?.slice(1, 3), ['first line second line', '']);
+    assert.deepEqual(texts.get('plain')?.slice(1, 3), ['one line', '']);
+    for (const lines of texts.values()) assert.match(lines[0], /· type user · /, 'a key after the block still parses');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+const repo = new URL('..', import.meta.url).pathname;
+
+test('a source added to Origin without an adapter fails tsc', () => {
+  const memory = join(repo, 'src/memory.ts'), sources = join(repo, 'src/import/sources.ts');
+  const config = ts.getParsedCommandLineOfConfigFile(join(repo, 'tsconfig.json'), {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: diagnostic => { throw new Error(ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')); } });
+  assert.ok(config);
+  const errors = (memoryText: string) => {
+    const host = ts.createCompilerHost(config.options), getSourceFile = host.getSourceFile.bind(host);
+    host.getSourceFile = (name, languageVersion, ...rest) => name === memory ? ts.createSourceFile(name, memoryText, languageVersion) : getSourceFile(name, languageVersion, ...rest);
+    const program = ts.createProgram([sources], config.options, host);
+    return ts.getPreEmitDiagnostics(program, program.getSourceFile(sources)).map(d => ts.flattenDiagnosticMessageText(d.messageText, '\n'));
+  };
+  const original = readFileSync(memory, 'utf8'), withFifth = original.replace("| 'chatgpt';", "| 'chatgpt' | 'slack';");
+  assert.notEqual(withFifth, original);
+  assert.deepEqual(errors(original), []);
+  const failures = errors(withFifth);
+  assert.match(failures[0], /does not satisfy the expected type 'Record<[^>]*"slack"[^>]*, Adapter>'[\s\S]*Property 'slack' is missing/);
+});
+
+test('lint rejects a comparison of an import source with its name anywhere in src except the adapter table, and ignores other sources', () => {
+  const root = temp();
+  for (const dir of ['src/import', 'test']) mkdirSync(join(root, dir), { recursive: true });
+  const compare = [
+    "export const a = (c: { source: string }) => c.source === 'claude';",
+    "export const b = (c: { source: string }) => 'codex' !== c.source;",
+    "export const d = (c: { source: string }) => { switch (c.source) { case 'chatgpt': return 1; default: return 0; } };",
+    "export const kept = (c: { source: string; id: string }, other: string) => c.source === other || c.id === 'claude' || other === 'claude';",
+  ].join('\n') + '\n';
+  writeFileSync(join(root, 'src/import/sources.ts'), compare);
+  writeFileSync(join(root, 'src/import/branch.ts'), compare);
+  writeFileSync(join(root, 'src/outside.ts'), "export const tell = (c: { source: string }) => c.source === 'claude-memory';\n");
+  writeFileSync(join(root, 'src/agents.ts'), "export const tell = (event: { source: string }) => event.source === 'extension';\n");
+  try {
+    const run = (() => { try { return execFileSync(process.execPath, ['--import', 'tsx', join(repo, 'scripts/lint.ts'), root], { cwd: repo, encoding: 'utf8' }); } catch (error) { return record(error) ? String(error.stdout) : ''; } })();
+    const message = 'Per-source behavior lives in the adapter table in src/import/sources.ts.';
+    assert.deepEqual(run.split('\n').filter(line => line.startsWith('src/')), [
+      ...[1, 2, 3].map(line => `src/import/branch.ts:${line} source-branch ${message}`),
+      `src/outside.ts:1 source-branch ${message}`,
+    ]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('lint fails loudly when it cannot read the import source names from Origin, instead of letting source-branch check nothing', () => {
+  const root = temp();
+  for (const dir of ['scripts', 'src', 'test']) mkdirSync(join(root, dir));
+  copyFileSync(join(repo, 'scripts/lint.ts'), join(root, 'scripts/lint.ts'));
+  fs.symlinkSync(join(repo, 'node_modules'), join(root, 'node_modules'));
+  const lint = () => spawnSync(process.execPath, ['--import', 'tsx', join(root, 'scripts/lint.ts'), root], { cwd: repo, encoding: 'utf8' });
+  try {
+    writeFileSync(join(root, 'src/memory.ts'), readFileSync(join(repo, 'src/memory.ts'), 'utf8'));
+    assert.doesNotMatch(lint().stdout, /cannot read the import source names/, 'the real Origin line is read');
+    writeFileSync(join(root, 'src/memory.ts'), "export type Origin = { source: 'claude' | 'codex' };\n");
+    const run = lint();
+    assert.equal(run.status, 1);
+    assert.match(run.stdout, /^scripts\/lint\.ts: cannot read the import source names from Origin in src\/memory\.ts, so the source-branch rule would check nothing\.\n/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the import dialog asks each source its own questions and lists a Codex conversation under its first real message', async () => {
+  const ambient = process.env.HOME, home = temp(), root = temp(), memory = new Memory(root, short);
+  process.env.HOME = home;
+  const claude = join(home, '.claude/projects/-synthetic'), rollouts = join(home, '.codex/sessions/2026');
+  for (const dir of [join(claude, 'memory'), rollouts]) mkdirSync(dir, { recursive: true });
+  lines(join(claude, 'session.jsonl'), [{ type: 'user', uuid: 'u', sessionId: 's1', cwd: '/synthetic', timestamp: date, message: { role: 'user', content: 'claude question' } }]);
+  writeFileSync(join(claude, 'memory', 'note.md'), '---\nname: Note\n---\nremember this\n');
+  copyFileSync(codexFixture, join(rollouts, 'rollout.jsonl'));
+  const chatgpt = join(root, 'conversations.json');
+  writeFileSync(chatgpt, JSON.stringify([{ id: 'chat-1', title: 'ChatGPT title', create_time: 100, mapping: { u: { parent: null, message: { id: 'u', author: { role: 'user' }, create_time: 100, content: { parts: ['hi'] } } } } }]));
+  const drive = async (label: string) => {
+    const asked: string[] = [], pickers: string[] = [];
+    let preview = '';
+    const ui: Parameters<typeof chooseImport>[0]['ui'] = {
+      select: async (title, options) => { asked.push(title.split('\n')[0]); return title.startsWith('Import into') ? label : options.find(o => o.startsWith('Choose individual')) ?? options[0]; },
+      input: async prompt => { asked.push(prompt); return chatgpt; },
+      confirm: async (_title, message) => { preview = message; return false; }, notify: () => {}, setWidget: () => {},
+      custom: factory => new Promise(resolve => {
+        const component = factory({ terminal: { rows: 40 }, requestRender: () => {} } as never, { fg: (_tone: string, text: string) => text } as never, undefined as never, resolve as never);
+        if ('render' in component) pickers.push(component.render(120).join('\n'));
+        if ('handleInput' in component) { component.handleInput?.('\x01'); component.handleInput?.('\r'); }
+      }),
+    };
+    await chooseImport({ ui }, 'test', memory, 'fixture', new AbortController().signal);
+    return { asked, pickers, preview };
+  };
+  try {
+    const codexRun = await drive('Codex');
+    assert.deepEqual(codexRun.asked, ['Import into test · source', 'Conversation dates', '1 conversations · 0.0 MB source files']);
+    assert.match(codexRun.pickers[0], /^Projects · 0 selected/);
+    assert.match(codexRun.pickers[1], /^Conversations · 0 selected[\s\S]*2026-03-04 · Add a --dry-run flag to the sync command\. · 0199c0de-1111-7222-8333-444455556666/);
+    assert.match(codexRun.preview, /Historical user messages and final replies; tool activity excluded\.\n1 conversations selected · 4 new messages · 0 duplicates skipped/);
+    const claudeRun = await drive('Claude Code');
+    assert.deepEqual(claudeRun.asked, codexRun.asked);
+    assert.match(claudeRun.pickers[1], /claude question/);
+    const memoryRun = await drive('Claude Code memories');
+    assert.deepEqual(memoryRun.asked, ['Import into test · source', 'Memory dates', '1 memories · 0.0 MB source files']);
+    assert.match(memoryRun.pickers[1], /^Memories · 0 selected/);
+    assert.match(memoryRun.preview, /Each memory file as one dated historical note; MEMORY\.md indexes excluded\.\n1 memories selected · 1 new notes/);
+    const chatgptRun = await drive('ChatGPT export');
+    assert.deepEqual(chatgptRun.asked, ['Import into test · source', 'ChatGPT export ZIP, extracted folder, or conversations JSON path', 'Conversation dates', '1 conversations · 0.0 MB source files']);
+    assert.equal(chatgptRun.pickers.length, 1, 'ChatGPT conversations have no projects to pick');
+  } finally {
+    await memory.close();
+    if (ambient === undefined) delete process.env.HOME; else process.env.HOME = ambient;
+    for (const dir of [home, root]) rmSync(dir, { recursive: true, force: true });
+  }
 });

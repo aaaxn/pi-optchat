@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 import optchat from '../src/index.ts';
 import { splitView } from '../src/cache.ts';
 import { IMPORT_GUIDANCE } from '../src/import/guidance.ts';
@@ -12,7 +13,6 @@ import { CAP, Memory, NODE, VIEW } from '../src/memory.ts';
 import { createProfile, profilePath } from '../src/profiles.ts';
 import * as transcript from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
-import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 
 const doc = readFileSync(resolve(import.meta.dirname, '..', 'AGENTS.md'), 'utf8');
 const section = (heading: string) => doc.split(/^## /m).find(part => part.startsWith(heading)) ?? assert.fail(`AGENTS.md has no "${heading}" section`);

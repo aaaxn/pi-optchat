@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 import { createAssistantMessageEventStream, getCurrentTools, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, getAgentDir, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { builtinExtensions, loadedBuiltins } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
-import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 
 const agentDir = getAgentDir();
 const server = resolve(import.meta.dirname, 'fixtures', 'fake-mcp.mjs');

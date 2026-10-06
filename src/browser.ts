@@ -1,11 +1,12 @@
 import { join } from 'node:path';
 import { atomicWrite } from './profiles.ts';
 import { type Memory } from './memory.ts';
+import { adapters } from './import/sources.ts';
 
 // One self-contained, read-only HTML snapshot of a profile's memory.
 export function exportBrowser(memory: Memory, profile: string, directory = memory.directory) {
   const data = JSON.stringify({
-    profile, budget: memory.budget, size: memory.size, view: memory.view,
+    profile, sources: Object.fromEntries(Object.entries(adapters).map(([source, adapter]) => [source, adapter.browserLabel])), budget: memory.budget, size: memory.size, view: memory.view,
     root: memory.root.map(({ i, kind, text, date, origin }) => ({ i, kind, text, date, ...(origin ? { origin: { source: origin.source, title: origin.title } } : {}) })),
     tree: [...memory.tree.values()].map(({ l, i, text }) => ({ l, i, text })),
   }).replace(/</g, '\\u003c');
@@ -82,7 +83,6 @@ function when(a, b) {
   if (lo === hi) return day(x) + ', ' + time(x);
   return x.toDateString() === y.toDateString() ? day(x) + ', ' + time(x) + '–' + time(y) : day(x) + ' ' + time(x) + ' – ' + day(y) + ' ' + time(y);
 }
-const SOURCE = { claude: 'Claude Code', 'claude-memory': 'Claude Code memory', codex: 'Codex', chatgpt: 'ChatGPT' };
 // Imported text starts with a "[Historical …]" line for the model; the meta line already says it.
 const body = e => { const j = e.origin && e.text.startsWith('[Historical ') ? e.text.indexOf(']\n') : -1; return j < 0 ? e.text : e.text.slice(j + 2); };
 const short = (s, n) => { s = s.replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -101,7 +101,7 @@ function mix(a, b) {
 function head(e) {
   const [label] = who(e), h = $('div', 'who');
   h.append($('b', null, label), ' · ' + when(e.i, e.i));
-  if (e.origin) h.append(' · imported from ' + SOURCE[e.origin.source] + (e.origin.title ? ': ' + short(e.origin.title, 60) : ''));
+  if (e.origin) h.append(' · imported from ' + D.sources[e.origin.source] + (e.origin.title ? ': ' + short(e.origin.title, 60) : ''));
   return h;
 }
 function message(e) {

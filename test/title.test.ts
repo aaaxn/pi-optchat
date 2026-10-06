@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fakeProvider, fakeRuntime } from './fakes.ts';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
@@ -11,7 +12,6 @@ import { mainTitle, TabTitle } from '../src/title.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
-import { fakeProvider, fakeRuntime } from './fakes.ts';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate: () => boolean) {

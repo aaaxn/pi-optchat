@@ -4,11 +4,11 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fakeProvider, fakeRuntime } from './fakes.ts';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { Memory } from '../src/memory.ts';
 import { createProfile, loadConfig, lockProfile, profilePath, profileSocket, saveConfig, SOCKET_PATH_LIMIT } from '../src/profiles.ts';
-import { fakeProvider, fakeRuntime } from './fakes.ts';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 

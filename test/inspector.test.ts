@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { makeChildren } from './fakes.ts';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { Memory } from '../src/memory.ts';
 import { fit, Inspector, type InspectorAction } from '../src/inspector.ts';
 import { UsageLedger } from '../src/usage.ts';
 import { RunHistory } from '../src/runs.ts';
-import { makeChildren } from './fakes.ts';
 
 test('inspector reaches old runs, opens the selected agent, shows usage, resizes, and shuts down', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-inspector-'));

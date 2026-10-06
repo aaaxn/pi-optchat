@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createAgentSession } from '@earendil-works/pi-coding-agent';
 import { taskDirectory } from '../src/agents.ts';
@@ -11,7 +12,6 @@ import { RunHistory } from '../src/runs.ts';
 import { emptyUsage, UsageLedger } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
 import { SUBAGENT, VIEW_DOC } from '../src/prompts.ts';
-import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 
 async function until(condition: () => boolean) {
   const deadline = Date.now() + 10000;
