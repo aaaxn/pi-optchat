@@ -182,7 +182,8 @@ Each run's context is the memory view and your new message, as the recipe prescr
 1. **Pi's prompt sections** (global and repository `AGENTS.md` files, skills, working directory) stay in the system prompt after the recipe's preamble, so the prompt depends on where Pi runs.
 2. **Subagents** are built in with Pi's SDK rather than a separate package. Only the main agent delegates, and one spawn reports once.
 3. **Profiles**, the **inspector**, the **usage ledger**, and **import** are additions. Import adds historical-record guidance to the prompts.
-4. **Not done**: computer use and hosting on an always-on machine.
+4. **View budget**: a message that is not summarized yet costs no budget. The recipe counts its placeholder, which made a large import fill the budget with placeholders and give the compactor almost no context.
+5. **Not done**: computer use and hosting on an always-on machine.
 
 ## Development
 

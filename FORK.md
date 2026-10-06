@@ -31,6 +31,7 @@ Fixes that suit both designs go upstream. Upstream already took these from the f
 | | This fork | Upstream |
 |---|---|---|
 | OpenAI Responses APIs | `reasoning.context: all_turns`, so a message that arrives mid-run keeps earlier reasoning. The compactor shares one cache key over SSE | No OpenAI-specific settings |
+| View budget | A message that is not summarized yet costs no budget, so an import gives the compactor a full view from its first message | Each such message costs the 30 bytes of its placeholder. A 6,000-message import starts over budget, and the compactor sees a few KB of context for the first third of it |
 | Summary size | A summary over 512 bytes is retried with the line cut at the limit, up to 5 tries, and the shortest is kept (recipe §4.3) | A summary up to 640 bytes is accepted without a retry |
 | Compactor scale line | A realistic 512-byte example with every kind and no ids or numbers (recipe §4.2) | A shorter example padded with dots to 512 bytes |
 

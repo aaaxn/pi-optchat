@@ -17,7 +17,6 @@ const UNBUILT = '(not summarized yet: zoom it)';
 export const start = ({ l, i }: Part) => i * 2 ** l;
 export const end = (part: Part) => start(part) + 2 ** part.l;
 export const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
-const UNBUILT_BYTES = bytes(UNBUILT);
 export const flat = (s: string) => s.replace(/[\r\n]+/g, ' ');
 const lineBytes = (s: string) => bytes(flat(s));
 const VIEW_OPEN = '<chat>\n';
@@ -127,7 +126,8 @@ export class Memory {
   }
   node(part: Part) { return this.tree.get(key(part)); }
   private text(part: Part) { return this.node(part)?.text ?? UNBUILT; }
-  private partBytes(part: Part) { return this.node(part)?.size ?? UNBUILT_BYTES; }
+  /** Unlike recipe §5.2, a placeholder costs no budget: no call ever sees one (§6), and an import's thousands of them would fill the view. */
+  private partBytes(part: Part) { return this.node(part)?.size ?? 0; }
   private push(i: number) { const part = { l: 0, i }; this.view.push(part); this.viewBytes += this.partBytes(part); }
   render() { return `${VIEW_OPEN}${this.view.map(p => `${start(p)}+${2 ** p.l}|${flat(this.text(p))}`).join('\n')}\n</chat>`; }
   get ready() { return this.view.every(p => this.node(p)); }
@@ -210,7 +210,7 @@ export class Memory {
     appendJson(join(this.directory, 'tree', `${localDay()}.jsonl`), node);
     this.tree.set(key(part), node); this.retryAt.delete(key(part));
     // A leaf is usually still in the view when built, but after a damaged tree file a saved parent can already hide it.
-    if (part.l === 0) { this.leaves++; if (this.visible(part)) this.viewBytes += node.size - UNBUILT_BYTES; }
+    if (part.l === 0) { this.leaves++; if (this.visible(part)) this.viewBytes += node.size; }
     if (!this.retryAt.size) this.lastError = undefined;
     this.fit();
   }

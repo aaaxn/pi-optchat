@@ -19,3 +19,9 @@ The source remains upstream rather than duplicating the full article here. Its f
 - `src/import/`: profile-scoped historical imports retain user messages and final assistant replies, following the lighter history described in recipe section 10. Source adapters (one table in `src/import/sources.ts`), final-reply detection, replay and scaffolding filtering, and ChatGPT branch labels are integration choices. Live-chat tool logging remains unchanged.
 
 Profiles, native Pi UI, conversation import, and local Git checkpoints are integration choices described in the README.
+
+## Deviations
+
+AGENTS.md lists every accepted deviation. One changes the memory itself:
+
+- `src/memory.ts` counts only summaries against the view budget. Recipe §5.2 also counts the placeholder of a message that is not summarized yet. No call sees a placeholder (§6), but an import stages its whole log at once. In a 5,996-message rebuild the placeholders took 180 KB of the 128,000-byte budget before the first summary, so `fit` merged every finished pair and the compactor saw 3 to 5 KB of context for the first third of the import. With the change, it sees a full view throughout, as in a live chat. In a replay of that log, live turn views changed in 10 of 3,267 turns by the timing of one merge, and the final view stayed the same.
