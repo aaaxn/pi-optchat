@@ -63,7 +63,7 @@ function records(dir: string, warn: (s: string) => void): unknown[] {
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
-function isEntry(value: unknown): value is Entry {
+export function isEntry(value: unknown): value is Entry {
   return object(value) && Number.isSafeInteger(value.i) && typeof value.kind === 'string'
     && ['user', 'talk', 'tool', 'echo', 'note'].includes(value.kind)
     && typeof value.text === 'string' && typeof value.date === 'string';

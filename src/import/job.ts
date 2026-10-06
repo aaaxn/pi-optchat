@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, rmSync, cpSync, mkdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Memory, bytes, type Entry, type Compressor } from '../memory.ts';
+import { Memory, bytes, isEntry, type Entry, type Compressor } from '../memory.ts';
 import { atomicWrite } from '../profiles.ts';
 import { record } from '../cache.ts';
 import type { ImportedEntry } from './sources.ts';
@@ -92,8 +92,12 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
   progress: (state: ImportProgress) => void = () => {}): Promise<ImportJob> {
   const job = pendingImport(dir); if (!job) throw new Error('No pending import.');
   const path = generationPath(dir, job.target);
+  const finish = () => { rmSync(join(path, STAGED), { force: true }); rmSync(pendingFile(dir)); };
+  // A crash after the pointer swap leaves only the cleanup to do.
+  if (memoryDirectory(dir) === path) { finish(); return job; }
   if (!existsSync(join(path, STAGED))) throw new Error('Import staging data is missing; original memory remains intact.');
-  const plan: Entry[] = readFileSync(join(path, STAGED), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const plan: unknown[] = readFileSync(join(path, STAGED), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+  if (!plan.every(isEntry)) throw new Error('Import staging data is invalid; original memory remains intact.');
   const memory = new Memory(path, compress, () => {});
   const report = () => progress({ messages: memory.root.length - memory.pending, total: plan.length, summaries: memory.tree.size, error: memory.lastError });
   const timer = setInterval(report, 500);
@@ -107,7 +111,6 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
     await memory.close();
     atomicWrite(join(dir, 'imports', `${job.id}.json`), JSON.stringify({ ...job, completed: new Date().toISOString() }, null, 2));
     atomicWrite(join(dir, 'active-memory.json'), JSON.stringify(job.target));
-    rmSync(pendingFile(dir));
-    report(); return job;
+    finish(); report(); return job;
   } finally { clearInterval(timer); await memory.close(); }
 }
