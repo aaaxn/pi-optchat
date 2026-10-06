@@ -593,7 +593,8 @@ test('lint rejects a comparison of an import source with a name outside the adap
 });
 
 test('the import dialog asks each source its own questions and lists a Codex conversation under its first real message', async () => {
-  const home = process.env.HOME ?? '', root = temp(), memory = new Memory(root, short);
+  const ambient = process.env.HOME, home = temp(), root = temp(), memory = new Memory(root, short);
+  process.env.HOME = home;
   const claude = join(home, '.claude/projects/-synthetic'), rollouts = join(home, '.codex/sessions/2026');
   for (const dir of [join(claude, 'memory'), rollouts]) mkdirSync(dir, { recursive: true });
   lines(join(claude, 'session.jsonl'), [{ type: 'user', uuid: 'u', sessionId: 's1', cwd: '/synthetic', timestamp: date, message: { role: 'user', content: 'claude question' } }]);
@@ -635,6 +636,7 @@ test('the import dialog asks each source its own questions and lists a Codex con
     assert.equal(chatgptRun.pickers.length, 1, 'ChatGPT conversations have no projects to pick');
   } finally {
     await memory.close();
-    for (const dir of [join(home, '.claude'), join(home, '.codex'), root]) rmSync(dir, { recursive: true, force: true });
+    if (ambient === undefined) delete process.env.HOME; else process.env.HOME = ambient;
+    for (const dir of [home, root]) rmSync(dir, { recursive: true, force: true });
   }
 });
