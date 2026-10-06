@@ -138,7 +138,7 @@ A fix that suits both designs can go upstream. Show the user the diff and the PR
 
 The user's always-on Pi loads this extension from the main checkout. Switching branches there changes the code that Pi runs.
 
-- Keep the main checkout on `main` and clean. Work in a git worktree beside it, such as `git worktree add ../pi-optchat-<name> -b <branch> origin/main`, then symlink `node_modules` from the main checkout.
+- Keep the main checkout on `main` and clean. Work in a git worktree at `.worktrees/<branch>`: run `git worktree add .worktrees/<branch> -b <branch> origin/main` from the main checkout, then symlink `node_modules` from the main checkout.
 - After a merge, run `git pull --ff-only` in the main checkout, then remove the worktree and delete the local and remote branch. Pi loads the new code when it restarts. A paused import resumes from its staging file.
 - Commit only when the user asks.
 - Commit only files you changed in this session. Stage explicit paths (`git add <path>`). Never `git add -A` or `git add .`.
