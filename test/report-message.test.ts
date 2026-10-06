@@ -4,7 +4,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAssistantMessageEventStream, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
-import { createAgentSession, CustomMessageComponent, DefaultResourceLoader, initTheme, ModelRuntime, SessionManager, SettingsManager,
+import { createAgentSession, CustomMessageComponent, DefaultResourceLoader, initTheme, SessionManager, SettingsManager,
   UserMessageComponent, type ExtensionAPI, type MessageRenderer } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
@@ -12,6 +12,7 @@ import { registerReportRenderer, reportParts } from '../src/report-message.ts';
 import { REPORT_TYPE, textContent } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
+import { fakeProvider, fakeRuntime } from './fakes.ts';
 
 initTheme('dark', false);
 const plain = (lines: string[]) => lines.join('\n').replace(/\x1b\[[0-9;:]*[A-Za-z]|\x1b[\]_][^\x07\x1b]*(\x07|\x1b\\)/g, '');
@@ -49,32 +50,25 @@ test('a report reaches an idle or busy main agent as a user message to the model
     createProfile('fixture');
     const config = loadConfig(profilePath('fixture'));
     saveConfig(profilePath('fixture'), { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
-    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
-      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-    runtime.registerProvider('fixture', {
-      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-      streamSimple(model, context) {
-        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
-        const text = textContent(context.messages.at(-1)?.content);
-        if (!compression) {
-          const snapshot = structuredClone(context);
-          systems.push(textContent(snapshot.messages.find(m => m.role === 'system')?.content));
-          snapshot.messages = snapshot.messages.filter(m => m.role !== 'system');
-          captured.push(snapshot);
-        }
-        const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: compression ? 'Summary.' : `Answer to: ${text.split('</chat>').at(-1)?.trim()}` }],
-          timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
-        const stream = createAssistantMessageEventStream();
-        void (async () => {
-          if (text.endsWith('Long task.')) { stream.push({ type: 'start', partial: reply }); notifyHeld(); await released; }
-          stream.push({ type: 'done', reason: 'stop', message: reply });
-          stream.end();
-        })();
-        return stream;
-      },
-    });
+    const runtime = await fakeRuntime(dir, fakeProvider((model, context) => {
+      const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+      const text = textContent(context.messages.at(-1)?.content);
+      if (!compression) {
+        const snapshot = structuredClone(context);
+        systems.push(textContent(snapshot.messages.find(m => m.role === 'system')?.content));
+        snapshot.messages = snapshot.messages.filter(m => m.role !== 'system');
+        captured.push(snapshot);
+      }
+      const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: compression ? 'Summary.' : `Answer to: ${text.split('</chat>').at(-1)?.trim()}` }],
+        timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
+      const stream = createAssistantMessageEventStream();
+      void (async () => {
+        if (text.endsWith('Long task.')) { stream.push({ type: 'start', partial: reply }); notifyHeld(); await released; }
+        stream.push({ type: 'done', reason: 'stop', message: reply });
+        stream.end();
+      })();
+      return stream;
+    }, { model: 'fixture' }), 'fixture');
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
     const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
       noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });

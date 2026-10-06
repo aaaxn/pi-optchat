@@ -9,7 +9,7 @@
   },
   "scripts": {
     "check": "tsc --noEmit && tsx scripts/lint.ts",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --import ./test/support.ts --test test/*.test.ts",
     "test:live": "tsx test/live.ts"
   },
   "devDependencies": {

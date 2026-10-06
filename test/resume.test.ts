@@ -4,14 +4,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
-import { createAgentSession, ModelRegistry, ModelRuntime, type AgentSession } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, type AgentSession } from '@earendil-works/pi-coding-agent';
 import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
-
-// Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
-process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
+import { fakeProvider, fakeRuntime, makeChildren } from './fakes.ts';
 
 async function until(condition: () => boolean) {
   const deadline = Date.now() + 10000;
@@ -27,39 +25,33 @@ async function setup(prefix: string) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   const releases = new Map<string, () => void>();
   const hooks: { beforeSession?: () => Promise<void>; opened?: (session: AgentSession) => void } = {};
-  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-  runtime.registerProvider('optchat-test', {
-    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple(model, context, options) {
-      const stream = createAssistantMessageEventStream();
-      const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
-      const answers = context.messages.filter(m => m.role === 'assistant');
-      const last = context.messages.at(-1), lastText = textContent(last && 'content' in last ? last.content : '');
-      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: '' }], api: model.api, provider: model.provider, model: model.id,
-        timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
-      if (last?.role === 'user' && lastText.startsWith('resume ')) {
-        message.content = [{ type: 'toolCall', id: `call-${answers.length}`, name: 'tell', arguments: { id: lastText.slice(7), message: `${task} wants more` } }];
-        message.stopReason = 'toolUse';
-      } else message.content = [{ type: 'text', text: last?.role === 'toolResult' ? `asked: ${lastText}`
-        : answers.length === 0 ? `${task} first report` : `${task} resumed after "${textContent(answers[0].content)}" heard: ${lastText}` }];
-      void (async () => {
-        stream.push({ type: 'start', partial: message });
-        if (answers.length === 0 && /^(hold|boss)/.test(task)) await new Promise<void>(resolve => {
-          releases.set(task, resolve); options?.signal?.addEventListener('abort', () => resolve(), { once: true });
-          if (options?.signal?.aborted) resolve();
-        });
-        if (options?.signal?.aborted) { message.stopReason = 'aborted'; stream.push({ type: 'error', reason: 'aborted', error: message }); }
-        else stream.push({ type: 'done', reason: message.stopReason === 'toolUse' ? 'toolUse' : 'stop', message });
-        stream.end();
-      })();
-      return stream;
-    },
-  });
+  const runtime = await fakeRuntime(dir, fakeProvider((model, context, options) => {
+    const stream = createAssistantMessageEventStream();
+    const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
+    const answers = context.messages.filter(m => m.role === 'assistant');
+    const last = context.messages.at(-1), lastText = textContent(last && 'content' in last ? last.content : '');
+    const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: '' }], api: model.api, provider: model.provider, model: model.id,
+      timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+    if (last?.role === 'user' && lastText.startsWith('resume ')) {
+      message.content = [{ type: 'toolCall', id: `call-${answers.length}`, name: 'tell', arguments: { id: lastText.slice(7), message: `${task} wants more` } }];
+      message.stopReason = 'toolUse';
+    } else message.content = [{ type: 'text', text: last?.role === 'toolResult' ? `asked: ${lastText}`
+      : answers.length === 0 ? `${task} first report` : `${task} resumed after "${textContent(answers[0].content)}" heard: ${lastText}` }];
+    void (async () => {
+      stream.push({ type: 'start', partial: message });
+      if (answers.length === 0 && /^(hold|boss)/.test(task)) await new Promise<void>(resolve => {
+        releases.set(task, resolve); options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+        if (options?.signal?.aborted) resolve();
+      });
+      if (options?.signal?.aborted) { message.stopReason = 'aborted'; stream.push({ type: 'error', reason: 'aborted', error: message }); }
+      else stream.push({ type: 'done', reason: message.stopReason === 'toolUse' ? 'toolUse' : 'stop', message });
+      stream.end();
+    })();
+    return stream;
+  }));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const reports: string[] = [], warnings: string[] = [];
-  const make = (parentSession: string) => new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { parentSession, createSession: async options => {
+  const make = (parentSession: string) => makeChildren({ memory, runtime, dir, report: async text => { reports.push(text); }, warn: text => warnings.push(text), parentSession, createSession: async options => {
       await hooks.beforeSession?.();
       const created = await createAgentSession({ ...options, modelRuntime: runtime });
       hooks.opened?.(created.session);
