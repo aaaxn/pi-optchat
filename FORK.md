@@ -38,4 +38,6 @@ Fixes that suit both designs go upstream. Upstream already took these from the f
 | | This fork | Upstream |
 |---|---|---|
 | Claude Code slash commands, `!` shell commands, and their output | Output is dropped, and so is a slash command without arguments, which never becomes the conversation title. What the user typed is kept as plain `/name args` or `!command` | Imported as user messages with their XML wrappers |
+| Codex's own context messages | Dropped from entries and from the title: the AGENTS.md instructions, the environment context, and the other fragments Codex marks as injected | Imported as user messages, so a conversation can be titled `# AGENTS.md instructions for ...` |
+| A resumed Claude Code transcript | Listed under its file name. Its copied messages keep the session id they had, so a re-import counts them once | Takes the conversation id from a `sessionId` in the file's first 60 lines |
 | Header on each imported message | `[Historical <source> · YYYY-MM-DD HH:MMZ · <first 13 characters of the conversation id> · <title>]`. The full id stays in the structured origin | The full conversation id and an ISO timestamp with milliseconds |
