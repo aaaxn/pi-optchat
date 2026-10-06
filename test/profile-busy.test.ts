@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { createConnection } from 'node:net';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { Memory } from '../src/memory.ts';
-import { createProfile, loadConfig, lockProfile, profilePath, profileSocket, saveConfig } from '../src/profiles.ts';
+import { createProfile, loadConfig, lockProfile, profilePath, profileSocket, saveConfig, SOCKET_PATH_LIMIT } from '../src/profiles.ts';
 import { fakeProvider, fakeRuntime } from './fakes.ts';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -100,13 +100,25 @@ test('a client that hangs up early does not crash the process holding the lock',
   }
 });
 
-test('a socket path that the system rejects names TMPDIR and its length, and a normal path locks', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'optchat-sock-')), long = join(root, 'p'.repeat(200)), oldTmp = process.env.TMPDIR;
+test('a socket path over the system limit names TMPDIR and its length without binding a truncated socket, and one at the limit locks', async () => {
+  const root = mkdtempSync('/tmp/oc.'), oldTmp = process.env.TMPDIR;
   try {
+    const fileLength = Buffer.byteLength(basename(profileSocket(root)));
+    const tmpdirOf = (socketLength: number) => { const dir = join(root, 'q'.repeat(socketLength - fileLength - 1 - root.length - 1)); mkdirSync(dir); return dir; };
+    const atLimit = tmpdirOf(SOCKET_PATH_LIMIT), overLimit = tmpdirOf(SOCKET_PATH_LIMIT + 1), long = join(root, 'p'.repeat(200));
+    mkdirSync(long);
+
+    process.env.TMPDIR = atLimit;
+    assert.equal(Buffer.byteLength(profileSocket(root)), SOCKET_PATH_LIMIT);
     const unlock = await lockProfile(root, 'holder'); await unlock();
-    mkdirSync(long); process.env.TMPDIR = long;
-    await assert.rejects(lockProfile(root, 'holder'), /TMPDIR to a shorter directory/);
-    await assert.rejects(lockProfile(root, 'holder'), new RegExp(`${Buffer.byteLength(profileSocket(root))} bytes`));
+
+    for (const tmp of [overLimit, long]) {
+      process.env.TMPDIR = tmp;
+      await assert.rejects(lockProfile(root, 'holder'), /TMPDIR to a shorter directory/);
+      await assert.rejects(lockProfile(root, 'holder'), new RegExp(`${Buffer.byteLength(profileSocket(root))} bytes`));
+    }
+    assert.deepEqual(readdirSync(overLimit), []);
+    assert.deepEqual(readdirSync(root).sort(), [basename(atLimit), basename(overLimit), basename(long)].sort(), 'no truncated socket was bound next to the directories');
   } finally {
     if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp;
     rmSync(root, { recursive: true, force: true });

@@ -64,9 +64,13 @@ export function profileSocket(dir: string) {
   return join(tmpdir(), `pi-optchat-${process.getuid?.() ?? 'user'}-${hash}.sock`);
 }
 
+// sun_path is 104 bytes on macOS and 108 elsewhere, both including the NUL. Node 22 binds a truncated path instead of failing, so the length is checked before listen.
+export const SOCKET_PATH_LIMIT = process.platform === 'darwin' ? 103 : 107;
+
 /** OS-owned socket lifetime, no timeout-based stealing of a busy profile. */
 export async function lockProfile(dir: string, description: string) {
   const socketPath = profileSocket(dir);
+  if (Buffer.byteLength(socketPath) > SOCKET_PATH_LIMIT) throw new Error(`Cannot lock the profile: the socket path is ${Buffer.byteLength(socketPath)} bytes, over this system's limit of ${SOCKET_PATH_LIMIT}. Set TMPDIR to a shorter directory: ${socketPath}`);
   const server = createServer(socket => { socket.on('error', () => socket.destroy()); socket.end(description); });
   const listen = () => new Promise<void>((resolve, reject) => {
     const failed = (error: Error) => { server.off('listening', ready); reject(error); };
@@ -75,9 +79,7 @@ export async function lockProfile(dir: string, description: string) {
   });
   try { await listen(); }
   catch (error) {
-    if (!(error instanceof Error) || !('code' in error)) throw error;
-    if (error.code === 'EINVAL' || error.code === 'ENAMETOOLONG') throw new Error(`Cannot lock the profile: the socket path is ${Buffer.byteLength(socketPath)} bytes, which this system rejects. Set TMPDIR to a shorter directory: ${socketPath}`);
-    if (error.code !== 'EADDRINUSE') throw error;
+    if (!(error instanceof Error) || !('code' in error) || error.code !== 'EADDRINUSE') throw error;
     const before = statSync(socketPath);
     const owner = await new Promise<string | undefined>((resolve, reject) => {
       const socket = createConnection(socketPath); let message = '';
@@ -90,6 +92,7 @@ export async function lockProfile(dir: string, description: string) {
     if (statSync(socketPath).ino !== before.ino) throw new Error('Profile lock changed; try again.');
     unlinkSync(socketPath); await listen();
   }
-  chmodSync(socketPath, 0o600);
-  return () => new Promise<void>(resolve => server.close(() => resolve()));
+  const unlock = () => new Promise<void>(resolve => server.close(() => resolve()));
+  try { chmodSync(socketPath, 0o600); } catch (error) { await unlock(); throw error; }
+  return unlock;
 }
