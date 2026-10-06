@@ -58,3 +58,26 @@ test('empty selection stays open and shutdown abort closes a custom picker once'
   controller.abort(); picker.handleInput('\r'); picker.dispose();
   assert.deepEqual(completed, [undefined]);
 });
+
+test('Space types into a non-empty filter, toggles on an empty one, and Tab always toggles', () => {
+  const completed: (number[] | undefined)[] = [];
+  const picker = new MultiSelect({ title: 'Projects', labels: ['my project', 'myproject', 'other'], rows: () => 24,
+    redraw: () => {}, done: value => completed.push(value), color: (_tone, text) => text });
+  try {
+    for (const ch of 'my project') picker.handleInput(ch);
+    const text = picker.render(80).join('\n');
+    assert.match(text, /Filter: my project/);
+    assert.match(text, /1\/1 matching/);
+    assert.match(text, /\[ \] 1\. my project/);
+    assert.match(text, /0 selected/);
+    picker.handleInput('\t');
+    assert.match(picker.render(80)[0], /1 selected/);
+    picker.handleInput('\x15'); picker.handleInput('\x1b[B');
+    picker.handleInput(' ');
+    assert.match(picker.render(80)[0], /2 selected/);
+    picker.handleInput('\t');
+    assert.match(picker.render(80)[0], /1 selected/);
+    picker.handleInput('\r');
+    assert.deepEqual(completed, [[0]]);
+  } finally { picker.dispose(); }
+});

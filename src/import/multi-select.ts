@@ -44,8 +44,8 @@ export class MultiSelect implements Component, Focusable {
     if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) return this.finish(undefined);
     if (matchesKey(data, 'return')) {
       if (this.selected.size) return this.finish([...this.selected].sort((a, b) => a - b));
-      this.error = 'Select at least one item with Space.';
-    } else if (matchesKey(data, 'space')) {
+      this.error = 'Select at least one item with Tab.';
+    } else if (matchesKey(data, 'tab') || (matchesKey(data, 'space') && !this.filter.getValue())) {
       const index = this.visible[this.cursor];
       if (index !== undefined) { if (this.selected.has(index)) this.selected.delete(index); else this.selected.add(index); }
     } else if (matchesKey(data, 'ctrl+a')) this.visible.forEach(i => this.selected.add(i));
@@ -82,7 +82,7 @@ export class MultiSelect implements Component, Focusable {
     if (!this.visible.length) lines.push('No matches. Ctrl+U clears the filter.');
     lines.push(color('dim', `${this.visible.length ? this.cursor + 1 : 0}/${this.visible.length} matching · ${this.labels.length} total`));
     lines.push(color(this.error ? 'error' : 'dim', this.error || '↑↓ move · PgUp/PgDn page · Home/End jump'));
-    lines.push(color('dim', 'Space toggle · Enter continue · Esc cancel'));
+    lines.push(color('dim', 'Tab toggle · Space toggle (empty filter) · Enter continue · Esc cancel'));
     lines.push(color('dim', 'Ctrl+A select matches · Ctrl+D clear matches'));
     return lines.map(line => truncateToWidth(line, width));
   }
