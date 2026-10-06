@@ -1,17 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { createConnection } from 'node:net';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
-import { createProfile, loadConfig, lockProfile, profilePath, saveConfig } from '../src/profiles.ts';
+import { Memory } from '../src/memory.ts';
+import { createProfile, loadConfig, lockProfile, profilePath, profileSocket, saveConfig, SOCKET_PATH_LIMIT } from '../src/profiles.ts';
 import { fakeProvider, fakeRuntime } from './fakes.ts';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: string, talked = false) {
-  const runtime = await fakeRuntime(dir, fakeProvider(undefined, { model: 'fixture' }), 'fixture');
+  const runtime = await fakeRuntime(dir, fakeProvider('Done.', { model: 'fixture' }), 'fixture');
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
   const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
     noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
@@ -76,4 +78,74 @@ test('a busy profile offers Back to pick another profile, and picking another op
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('a client that hangs up early does not crash the process holding the lock', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-lock-'));
+  const unlock = await lockProfile(dir, 'holder');
+  try {
+    const path = profileSocket(dir);
+    for (let round = 0; round < 20; round++) {
+      await Promise.all(Array.from({ length: 50 }, () => new Promise<void>(done => {
+        const client = createConnection(path);
+        client.on('error', () => done());
+        client.on('connect', () => { client.destroy(); done(); });
+      })));
+      await sleep(5);
+    }
+    await sleep(100);
+    await assert.rejects(lockProfile(dir, 'second'), /holder/);
+  } finally {
+    await unlock(); rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a socket path over the system limit names TMPDIR and its length without binding a truncated socket, and one at the limit locks', async () => {
+  const root = mkdtempSync('/tmp/oc.'), oldTmp = process.env.TMPDIR;
+  try {
+    const fileLength = Buffer.byteLength(basename(profileSocket(root)));
+    const tmpdirOf = (socketLength: number) => { const dir = join(root, 'q'.repeat(socketLength - fileLength - 1 - root.length - 1)); mkdirSync(dir); return dir; };
+    const atLimit = tmpdirOf(SOCKET_PATH_LIMIT), overLimit = tmpdirOf(SOCKET_PATH_LIMIT + 1), long = join(root, 'p'.repeat(200));
+    mkdirSync(long);
+
+    process.env.TMPDIR = atLimit;
+    assert.equal(Buffer.byteLength(profileSocket(root)), SOCKET_PATH_LIMIT);
+    const unlock = await lockProfile(root, 'holder'); await unlock();
+
+    for (const tmp of [overLimit, long]) {
+      process.env.TMPDIR = tmp;
+      await assert.rejects(lockProfile(root, 'holder'), /TMPDIR to a shorter directory/);
+      await assert.rejects(lockProfile(root, 'holder'), new RegExp(`${Buffer.byteLength(profileSocket(root))} bytes`));
+    }
+    assert.deepEqual(readdirSync(overLimit), []);
+    assert.deepEqual(readdirSync(root).sort(), [basename(atLimit), basename(overLimit), basename(long)].sort(), 'no truncated socket was bound next to the directories');
+  } finally {
+    if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a second writer that got past the lock is refused on its next turn, with the log intact', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-writer-')), oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = join(dir, 'home');
+  let session: Awaited<ReturnType<typeof start>>['session'] | undefined;
+  try {
+    createProfile('shared');
+    saveConfig(profilePath('shared'), { compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' }, subagent: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    const opened = await start(dir, { select: async () => 'shared' });
+    session = opened.session;
+    const other = new Memory(profilePath('shared'), async () => 'summary', () => {});
+    other.append('user', 'written by the other process'); await other.close();
+
+    await session.prompt('Question for the first process');
+    await session.agent.waitForIdle();
+    assert.match(opened.errors.join('\n'), /Another process wrote .*nothing was written/);
+    assert.ok(!opened.session.messages.some(m => m.role === 'assistant' && JSON.stringify(m.content).includes('Done.')), 'no model call after the refusal');
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+  }
+  const reopened = new Memory(join(dir, 'home', 'profiles', 'shared'), async () => 'summary', () => {});
+  try { assert.deepEqual(reopened.root.map(e => e.text), ['written by the other process']); }
+  finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
 });

@@ -1,9 +1,9 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CAP, NODE, VIEW, Memory, isView, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
+import { CAP, NODE, VIEW, Memory, isView, appendJson, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
 import { lockProfile } from '../src/profiles.ts';
 import { splitView, cachePayload, cacheFor } from '../src/cache.ts';
 import { SCALE } from '../src/compactor.ts';
@@ -64,6 +64,100 @@ test('torn final line is reported and the next append remains readable', async (
   memory = new Memory(dir, async () => 'summary', () => {});
   try { assert.equal(warnings.length, 1); assert.deepEqual(memory.root.map(e => e.text), ['first', 'second']); }
   finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a second writer on one profile is refused before it writes, and the profile still opens', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), compress = async () => 'summary';
+  const first = new Memory(dir, compress, () => {}), second = new Memory(dir, compress, () => {});
+  try {
+    first.append('user', 'from the first writer');
+    const file = join(dir, 'main', `${localDay()}.jsonl`), before = readFileSync(file, 'utf8');
+    assert.throws(() => second.append('user', 'from the second writer'), /Another process wrote .*nothing was written/);
+    assert.equal(readFileSync(file, 'utf8'), before);
+    assert.equal(second.root.length, 0);
+    assert.throws(() => second.append('user', 'a retry'), /Another process wrote/);
+  } finally { await first.close(); await second.close(); }
+  const reopened = new Memory(dir, compress, () => {});
+  try { assert.deepEqual(reopened.root.map(e => e.text), ['from the first writer']); }
+  finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a second writer that has seen today\'s file is refused after the other appends to it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), compress = async () => 'summary';
+  const first = new Memory(dir, compress, () => {}); first.append('user', 'one');
+  const second = new Memory(dir, compress, () => {});
+  try {
+    first.append('user', 'two');
+    assert.throws(() => second.append('user', 'three'), /Another process wrote .*nothing was written/);
+  } finally { await first.close(); await second.close(); }
+  const reopened = new Memory(dir, compress, () => {});
+  try { assert.deepEqual(reopened.root.map(e => e.text), ['one', 'two']); }
+  finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a day file that another process created first is caught, and an ordinary midnight rollover is not', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), compress = async () => 'summary';
+  mock.timers.enable({ apis: ['Date'], now: new Date(2026, 0, 1, 23, 59) });
+  const opened: Memory[] = [];
+  try {
+    const lone = new Memory(dir, compress, () => {}); opened.push(lone);
+    lone.append('user', 'before midnight');
+    mock.timers.setTime(new Date(2026, 0, 2, 0, 1).getTime());
+    lone.append('user', 'after midnight');
+    const a = new Memory(dir, compress, () => {}), b = new Memory(dir, compress, () => {}); opened.push(a, b);
+    mock.timers.setTime(new Date(2026, 0, 3, 0, 1).getTime());
+    b.append('user', 'b on the third');
+    assert.throws(() => a.append('user', 'a on the third'), /Another process wrote .*2026-01-03\.jsonl/);
+    b.append('user', 'b again');
+  } finally { mock.timers.reset(); await Promise.all(opened.map(m => m.close())); }
+  const reopened = new Memory(dir, compress, () => {});
+  try { assert.deepEqual(reopened.root.map(e => e.text), ['before midnight', 'after midnight', 'b on the third', 'b again']); }
+  finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a second writer whose first write starts a new day file is refused when the other wrote an older day file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), compress = async () => 'summary';
+  mock.timers.enable({ apis: ['Date'], now: new Date(2026, 0, 1, 12) });
+  const opened: Memory[] = [];
+  try {
+    const a = new Memory(dir, compress, () => {}), b = new Memory(dir, compress, () => {}); opened.push(a, b);
+    a.append('user', 'a on the first');
+    mock.timers.setTime(new Date(2026, 0, 2, 12).getTime());
+    assert.throws(() => b.append('user', 'b on the second'), /Another process wrote .*2026-01-02\.jsonl.*nothing was written/);
+    assert.equal(b.root.length, 0);
+  } finally { mock.timers.reset(); await Promise.all(opened.map(m => m.close())); }
+  const reopened = new Memory(dir, compress, () => {});
+  try { assert.deepEqual(reopened.root.map(e => e.text), ['a on the first']); }
+  finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('appendJson appends without a size, and with one it refuses a file of any other size', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), file = join(dir, 'log.jsonl');
+  try {
+    const one = appendJson(file, { n: 1 });
+    assert.equal(one, readFileSync(file).length);
+    const two = appendJson(file, { n: 2 }, one);
+    assert.equal(two, readFileSync(file).length);
+    assert.throws(() => appendJson(file, { n: 3 }, one), /nothing was written/);
+    assert.equal(readFileSync(file, 'utf8'), '{"n":1}\n{"n":2}\n');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('two writers that each summarize the same log leave a tree that still loads', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), compress = async () => 'summary';
+  const log = new Memory(dir, compress, () => {});
+  for (let i = 0; i < 3; i++) log.append('user', `message ${i}`);
+  await log.close();
+  const a = new Memory(dir, compress, () => {}), b = new Memory(dir, compress, () => {});
+  await Promise.all([a.settle(AbortSignal.timeout(5000), true), b.settle(AbortSignal.timeout(5000), true)]);
+  await Promise.all([a.close(), b.close()]);
+  const tree = readFileSync(join(dir, 'tree', `${localDay()}.jsonl`), 'utf8').trim().split('\n');
+  assert.ok(tree.length > a.tree.size, 'both writers saved the same nodes');
+  const reopened = new Memory(dir, compress, () => {});
+  try {
+    await reopened.settle(AbortSignal.timeout(5000), true);
+    assert.equal(reopened.root.length, 3); assert.equal(reopened.tree.size, a.tree.size);
+  } finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('a live profile cannot be opened by a second writer; other profiles can run', async () => {
