@@ -58,7 +58,8 @@ function imported(c: Conversation, id: string, kind: Kind, content: string, date
   if (!content.trim()) return undefined;
   // Text provenance survives compression. Stable per-message receipts survive moved files and repeated exports.
   const origin: Origin = { source: c.source, conversation: c.id, message: id, title: c.title, project: c.project };
-  return { kind, date, origin, text: `[Historical ${c.source} · ${minute(date)} · ${c.title}]\n${content}`,
+  // The agent reads only text, so the id's first 8 characters stay in it: enough to find the source file by glob.
+  return { kind, date, origin, text: `[Historical ${c.source} · ${minute(date)} · ${c.id.slice(0, 8)} · ${c.title}]\n${content}`,
     receipt: `import:${digest(JSON.stringify([c.source, c.id, id, kind, identity]))}` };
 }
 async function* jsonLines(file: string, warnings: string[], limit = Infinity, signal?: AbortSignal) {
