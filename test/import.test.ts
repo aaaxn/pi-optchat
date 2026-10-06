@@ -50,7 +50,7 @@ test('Claude imports user messages and final replies, omitting tool loops and re
 
 test('Claude slash commands keep only typed arguments, local command output is dropped, and headers stay short', async () => {
   const dir = temp(), file = join(dir, 'claude.jsonl');
-  const user = (uuid: string, content: string) => ({ type: 'user', uuid, sessionId: 'session-1', cwd: '/synthetic', timestamp: date, message: { role: 'user', content } });
+  const user = (uuid: string, content: string) => ({ type: 'user', uuid, sessionId: 'cbcb64a5-871a-4179-a897-e3683852d011', cwd: '/synthetic', timestamp: date, message: { role: 'user', content } });
   const reply = (uuid: string, text: string) => ({ type: 'assistant', uuid, timestamp: date, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text }] } });
   lines(file, [
     user('compact', '<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>'),
@@ -218,7 +218,7 @@ test('Claude discovery keeps the parent conversation and skips modern, legacy, a
   lines(join(workflow, 'conversation.jsonl'), [user]);
   try {
     const scan = await adapters.claude.scan(dir);
-    assert.deepEqual(scan.conversations.map(c => c.id), ['shared']);
+    assert.deepEqual(scan.conversations.map(c => c.id), ['session']);
     assert.deepEqual(scan.conversations.map(c => c.file), [parent]);
     assert.ok(scan.conversations.every(c => c.project === '/project' && c.date === date));
     const parsed = await readConversation(scan.conversations[0]);
@@ -463,17 +463,22 @@ test('a ChatGPT conversation with an empty or multi-line title gets a one-line h
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('a resumed Claude transcript takes its id from its first record, so copied messages import once', async () => {
+test('a resumed Claude transcript is listed under its file name, and its copied messages keep the old session key so they import once', async () => {
   const dir = temp();
   const user = (uuid: string, session: string, content: string) => ({ type: 'user', uuid, sessionId: session, cwd: '/project', timestamp: date, message: { role: 'user', content } });
   const reply = (uuid: string, session: string, content: string) => ({ type: 'assistant', uuid, sessionId: session, timestamp: date, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: content }] } });
-  lines(join(dir, 'A.jsonl'), [user('u1', 'A', 'q1'), reply('a1', 'A', 'r1')]);
-  lines(join(dir, 'B.jsonl'), [user('u1', 'A', 'q1'), reply('a1', 'A', 'r1'), user('u2', 'B', 'q2'), reply('a2', 'B', 'r2')]);
+  const copied = [user('u1', 'aaaaaaaa-0000', 'q1'), reply('a1', 'aaaaaaaa-0000', 'r1'), user('u2', 'aaaaaaaa-0000', 'q2'), reply('a2', 'aaaaaaaa-0000', 'r2')];
+  lines(join(dir, 'aaaaaaaa-0000.jsonl'), copied);
+  lines(join(dir, 'bbbbbbbb-1111.jsonl'), [...copied, user('u3', 'bbbbbbbb-1111', 'q3'), reply('a3', 'bbbbbbbb-1111', 'r3')]);
   try {
     const scan = await adapters.claude.scan(dir);
-    assert.deepEqual(scan.conversations.map(c => c.id), ['A', 'A']);
-    const all = (await Promise.all(scan.conversations.map(c => readConversation(c)))).flatMap(parsed => parsed.entries);
-    assert.deepEqual(deduplicate([], all).added.map(e => e.text.split('\n')[1]), ['q1', 'r1', 'q2', 'r2']);
+    assert.deepEqual(scan.conversations.map(c => c.id).sort(), ['aaaaaaaa-0000', 'bbbbbbbb-1111']);
+    const [old, resumed] = await Promise.all(scan.conversations.sort((x, y) => x.id.localeCompare(y.id)).map(c => readConversation(c)));
+    assert.deepEqual(resumed.entries.map(e => e.origin?.conversation), [...Array(4).fill('aaaaaaaa-0000'), 'bbbbbbbb-1111', 'bbbbbbbb-1111']);
+    assert.match(resumed.entries[0].text, /^\[Historical claude · [^·]*· bbbbbbbb-1111 · q1\]/);
+    const merged = deduplicate([], [...old.entries, ...resumed.entries]);
+    assert.deepEqual(merged.added.map(e => e.text.split('\n')[1]), ['q1', 'r1', 'q2', 'r2', 'q3', 'r3']);
+    assert.equal(merged.skipped, 4);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

@@ -81,14 +81,14 @@ function text(value: unknown): string {
   return '';
 }
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
-function imported(c: Conversation, id: string, kind: Kind, content: string, date: string, identity = content): ImportedEntry | undefined {
+function imported(c: Conversation, id: string, kind: Kind, content: string, date: string, identity = content, conversation = c.id): ImportedEntry | undefined {
   if (!content.trim()) return undefined;
   // Text provenance survives compression. Stable per-message receipts survive moved files and repeated exports.
-  const origin: Origin = { source: c.source, conversation: c.id, message: id, title: c.title, project: c.project };
+  const origin: Origin = { source: c.source, conversation, message: id, title: c.title, project: c.project };
   // The agent reads only text, so the id's first 13 characters stay in it: enough to find a Claude or Codex transcript by
   // glob. Codex ids are UUIDv7, whose first 8 characters are a coarse timestamp shared by many sessions.
   return { kind, date, origin, text: `[Historical ${c.source} · ${minute(date)} · ${c.id.slice(0, 13)} · ${titleOf(c.title, c.id)}]\n${content}`,
-    receipt: `import:${digest(JSON.stringify([c.source, c.id, id, kind, identity]))}` };
+    receipt: `import:${digest(JSON.stringify([c.source, conversation, id, kind, identity]))}` };
 }
 async function* jsonLines(file: string, warnings: string[], limit = Infinity, signal?: AbortSignal) {
   const stream = createReadStream(file, { encoding: 'utf8', signal });
@@ -148,9 +148,9 @@ function turns(c: Conversation) {
   return {
     entries, finish,
     reset: () => { pending = []; },
-    add(id: string, kind: Kind, content: string, date: string, identity = content) { const entry = imported(c, id, kind, content, date, identity); if (entry) entries.push(entry); },
-    assistant(parts: { id: string; content: string }[], date: string, final: boolean) {
-      pending = parts.flatMap(part => { const entry = imported(c, part.id, 'talk', part.content, date); return entry ? [entry] : []; });
+    add(id: string, kind: Kind, content: string, date: string, identity = content, conversation?: string) { const entry = imported(c, id, kind, content, date, identity, conversation); if (entry) entries.push(entry); },
+    assistant(parts: { id: string; content: string }[], date: string, final: boolean, conversation?: string) {
+      pending = parts.flatMap(part => { const entry = imported(c, part.id, 'talk', part.content, date, part.content, conversation); return entry ? [entry] : []; });
       if (final) finish();
     },
   };
@@ -184,18 +184,16 @@ const claude: Adapter = {
     // Import user conversations, not separate delegated runs (including Claude's older flat layout).
     skip: (folder, file) => relative(folder, dirname(file)).split(/[\\/]/).includes('subagents') || basename(file).startsWith('agent-'),
     async meta(records, meta) {
-      let id: string | undefined;
       for await (const { value: v, line } of records) {
         // Sidechain markers can appear late; picker metadata still comes from the first 60 lines.
         if (v.isSidechain === true) return undefined;
         if (line > 60) continue;
-        id ??= string(v.sessionId);
         meta.project = string(v.cwd) ?? meta.project;
         if (v.type === 'custom-title' || v.type === 'ai-title') meta.title = string(v.customTitle ?? v.aiTitle) ?? meta.title;
         const typed = record(v.message) && v.message.role === 'user' && !meta.title ? claudeScaffold(v.message.content) : '';
         if (typed.trim()) { meta.title = typed.replace(/\s+/g, ' ').slice(0, 110); meta.date = timestamp(v.timestamp, meta.date); }
       }
-      return { ...meta, id: id ?? meta.id };
+      return meta;
     },
   }, signal),
   entries: (c, signal) => readTranscript(c, signal, (v, line, date, t, warnings) => {
@@ -204,7 +202,7 @@ const claude: Adapter = {
     if (v.isMeta === true || v.isCompactSummary === true) return;
     if (v.isSidechain === true) return 'drop';
     if (!['user', 'assistant'].includes(String(v.type)) || !record(v.message)) return;
-    const m = v.message, id = string(v.uuid) ?? `line:${line}`;
+    const m = v.message, id = string(v.uuid) ?? `line:${line}`, session = string(v.sessionId);
     if (m.role === 'user' && typeof m.content === 'string' && /^\[Request interrupted by user(?: for tool use)?\]$/.test(m.content)) { t.reset(); return; }
     const blocks = Array.isArray(m.content) ? m.content : [];
     const toolActivity = blocks.some(b => record(b) && (['tool_use', 'server_tool_use', 'tool_result'].includes(String(b.type)) || String(b.type).endsWith('_tool_result')));
@@ -220,11 +218,11 @@ const claude: Adapter = {
       return [];
     });
     // Receipts keep the raw text, so a command already imported is still recognized.
-    if (m.role === 'user' && parts.length) { t.finish(); for (const part of parts) t.add(part.id, 'user', claudeScaffold(part.content), date, part.content); }
+    if (m.role === 'user' && parts.length) { t.finish(); for (const part of parts) t.add(part.id, 'user', claudeScaffold(part.content), date, part.content, session); }
     else if (m.role === 'assistant') {
       const final = m.stop_reason === 'end_turn' || m.stop_reason === 'stop_sequence';
       if (toolActivity || v.isApiErrorMessage === true || m.stop_reason && !final) t.reset();
-      else if (parts.length) t.assistant(parts, date, final);
+      else if (parts.length) t.assistant(parts, date, final, session);
       else if (!final) t.reset();
     }
   }),
