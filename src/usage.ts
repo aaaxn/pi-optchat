@@ -36,27 +36,27 @@ export function addUsage(total: Usage, usage: Usage) {
 /** One profile's ledger. Stable message IDs make resume/backfill idempotent. */
 export class UsageLedger {
   readonly entries: UsageEntry[] = [];
-  readonly warnings: string[] = [];
+  private invalid = 0;
   private readonly ids = new Set<string>();
   private readonly cursors = new Map<string, number>();
   private readonly file: string;
   constructor(directory: string) {
     this.file = join(directory, 'usage.jsonl');
-    let invalid = 0;
     const contents = existsSync(this.file) ? readFileSync(this.file, 'utf8') : '';
     for (const line of contents.split('\n')) {
       if (!line.trim()) continue;
       try {
         const entry: unknown = JSON.parse(line);
-        if (!validEntry(entry)) { invalid++; continue; }
+        if (!validEntry(entry)) { this.invalid++; continue; }
         if (entry.id && this.ids.has(entry.id)) continue;
         this.entries.push(entry); if (entry.id) this.ids.add(entry.id);
-      } catch { invalid++; }
+      } catch { this.invalid++; }
     }
-    if (invalid) this.warnings.push(`${invalid} unreadable usage records excluded; totals may be incomplete.`);
     if (contents && !contents.endsWith('\n')) appendFileSync(this.file, '\n');
   }
+  get warnings() { return this.invalid ? [`${this.invalid} unreadable usage records excluded; totals may be incomplete.`] : []; }
   add(entry: UsageEntry) {
+    if (!validEntry(entry)) { this.invalid++; return; }
     if (entry.id && this.ids.has(entry.id)) return;
     appendJson(this.file, entry);
     this.entries.push(entry); if (entry.id) this.ids.add(entry.id);
@@ -86,7 +86,7 @@ export class UsageLedger {
   select(range: UsageRange, session: string, now = Date.now()) {
     const today = new Date(now); today.setHours(0, 0, 0, 0);
     const since = range === 'Last hour' ? now - 3600_000 : range === 'Today' ? today.getTime() : range === 'Last 7 days' ? now - 7 * 86400_000 : 0;
-    return this.entries.filter(e => range === 'This session' ? e.session === session : Date.parse(e.date) >= since && Date.parse(e.date) <= now);
+    return this.entries.filter(e => range === 'This session' ? e.session === session : range === 'All time' || (Date.parse(e.date) >= since && Date.parse(e.date) <= now));
   }
 }
 
