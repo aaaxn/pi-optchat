@@ -167,6 +167,27 @@ test('a child resumed while the profile closes does not start', async () => {
   } finally { await cleanup(children); }
 });
 
+test('a resume being opened holds its slot and refuses a second resume of the same child', async () => {
+  const { dir, hooks, reports, make, cleanup } = await setup('optchat-resume-race-');
+  const children = make('session');
+  try {
+    const [solo] = await children.spawn([{ task: 'solo' }], dir);
+    await until(() => !children.active);
+    let opening!: () => void, opened!: () => void;
+    const started = new Promise<void>(resolve => { opening = resolve; });
+    // Only the first open blocks, so a second resume that slips past the guard would go ahead and fail the test.
+    hooks.beforeSession = () => { hooks.beforeSession = undefined; opening(); return new Promise<void>(resolve => { opened = resolve; }); };
+    const resume = children.tell(solo, 'more');
+    await started;
+    await assert.rejects(children.tell(solo, 'again'), /still finishing/, 'a second resume waits for the first');
+    await assert.rejects(children.spawn(Array.from({ length: 8 }, (_, i) => ({ task: `extra ${i}` })), dir), /at most 8 active agents/, 'the opening resume holds a slot');
+    opened();
+    assert.match(await resume, /had finished, so I resumed it/);
+    await until(() => !children.active);
+    assert.equal(reports.at(-1), `[${solo}] solo resumed after "solo first report" heard: more`);
+  } finally { await cleanup(children); }
+});
+
 test('a resume whose record cannot be saved leaves the child finished and resumable', async () => {
   const { dir, hooks, reports, make, cleanup } = await setup('optchat-resume-save-');
   const children = make('session');
