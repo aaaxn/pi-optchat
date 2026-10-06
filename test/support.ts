@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isMainThread } from 'node:worker_threads';
 
-// Preloaded with `--import` into every test process, before any test module reads the home directory, OptChat's data home or Pi's agent dir.
 // Worker threads inherit the flag and the environment, so only the main thread makes and removes the directories.
 if (isMainThread) {
   const sandboxes = (['HOME', 'OPTCHAT_HOME', 'PI_CODING_AGENT_DIR'] as const).map(name => {

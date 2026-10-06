@@ -14,7 +14,6 @@ const PROVIDER = 'optchat-test';
 const MODEL = 'child';
 const NO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
-/** A synthetic provider with one model. A string reply is the text of every answer; a function is the model itself. */
 export function fakeProvider(reply?: string | Stream, options: { model?: string; cost?: typeof NO_COST } = {}): ProviderConfig {
   const { model = MODEL, cost = NO_COST } = options;
   const streamSimple: Stream | undefined = typeof reply === 'string' ? model => {
@@ -31,7 +30,6 @@ export function fakeProvider(reply?: string | Stream, options: { model?: string;
   };
 }
 
-/** A Pi model runtime whose only credentials and caches live in `dir`, with `provider` registered under `name`. */
 export async function fakeRuntime(dir: string, provider: ProviderConfig, name = PROVIDER) {
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   runtime.registerProvider(name, provider);
@@ -45,7 +43,6 @@ interface ChildrenOptions {
   createSession?: typeof createAgentSession;
 }
 
-/** `Children` over a fake runtime. By default its sessions use that runtime and it runs the `child` model of `fakeProvider`. */
 export function makeChildren({ memory, runtime, dir, choice = { provider: PROVIDER, model: MODEL, thinking: 'minimal' }, instructions = '',
   report = async () => {}, warn = () => {}, parentSession, usage, builtins, createSession }: ChildrenOptions) {
   return new Children(memory, new ModelRegistry(runtime), () => choice, () => instructions, report, warn, dir,
