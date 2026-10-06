@@ -59,13 +59,9 @@ export function rememberProfile(name: string) { atomicWrite(join(dataHome(), 'la
 export class ProfileBusyError extends Error {
   constructor(readonly owner: string) { super(`Profile already running: ${owner}`); }
 }
-/** Unix socket paths are limited by sun_path: 104 bytes on macOS, 108 on Linux, each including the final NUL. */
-const SOCKET_PATH_MAX = 103;
 export function profileSocket(dir: string) {
   const hash = createHash('sha256').update(dir).digest('hex').slice(0, 24);
-  const path = join(tmpdir(), `pi-optchat-${process.getuid?.() ?? 'user'}-${hash}.sock`), length = Buffer.byteLength(path);
-  if (length > SOCKET_PATH_MAX) throw new Error(`Cannot lock the profile: its socket path is ${length} bytes and the limit is ${SOCKET_PATH_MAX}. Set TMPDIR to a shorter directory: ${path}`);
-  return path;
+  return join(tmpdir(), `pi-optchat-${process.getuid?.() ?? 'user'}-${hash}.sock`);
 }
 
 /** OS-owned socket lifetime, no timeout-based stealing of a busy profile. */
@@ -79,7 +75,9 @@ export async function lockProfile(dir: string, description: string) {
   });
   try { await listen(); }
   catch (error) {
-    if (!(error instanceof Error) || !('code' in error) || error.code !== 'EADDRINUSE') throw error;
+    if (!(error instanceof Error) || !('code' in error)) throw error;
+    if (error.code === 'EINVAL' || error.code === 'ENAMETOOLONG') throw new Error(`Cannot lock the profile: the socket path is ${Buffer.byteLength(socketPath)} bytes, which this system rejects. Set TMPDIR to a shorter directory: ${socketPath}`);
+    if (error.code !== 'EADDRINUSE') throw error;
     const before = statSync(socketPath);
     const owner = await new Promise<string | undefined>((resolve, reject) => {
       const socket = createConnection(socketPath); let message = '';

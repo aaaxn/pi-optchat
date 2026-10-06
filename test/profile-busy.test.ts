@@ -100,20 +100,13 @@ test('a client that hangs up early does not crash the process holding the lock',
   }
 });
 
-test('a socket path of 103 bytes locks, and a longer one names TMPDIR in the error', async () => {
-  const root = mkdtempSync('/tmp/oc.'), oldTmp = process.env.TMPDIR;
-  const under = (length: number) => {
-    process.env.TMPDIR = root;
-    const tmp = join(root, 'p'.repeat(length - Buffer.byteLength(profileSocket(root)) - 1));
-    mkdirSync(tmp); process.env.TMPDIR = tmp;
-  };
+test('a socket path that the system rejects names TMPDIR and its length, and a normal path locks', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'optchat-sock-')), long = join(root, 'p'.repeat(200)), oldTmp = process.env.TMPDIR;
   try {
-    under(103);
-    assert.equal(Buffer.byteLength(profileSocket(root)), 103);
     const unlock = await lockProfile(root, 'holder'); await unlock();
-    under(104);
-    assert.throws(() => profileSocket(root), /104 bytes.*TMPDIR to a shorter/);
-    await assert.rejects(lockProfile(root, 'holder'), /TMPDIR to a shorter/);
+    mkdirSync(long); process.env.TMPDIR = long;
+    await assert.rejects(lockProfile(root, 'holder'), /TMPDIR to a shorter directory/);
+    await assert.rejects(lockProfile(root, 'holder'), new RegExp(`${Buffer.byteLength(profileSocket(root))} bytes`));
   } finally {
     if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp;
     rmSync(root, { recursive: true, force: true });
