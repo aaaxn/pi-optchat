@@ -36,5 +36,5 @@ Fixes that suit both designs go upstream. Upstream already took these from the f
 
 | | This fork | Upstream |
 |---|---|---|
-| Claude Code slash commands and local command output | Dropped. A command with typed arguments is kept as plain `/name args`, and never becomes the conversation title | Imported as user messages with their XML wrappers |
+| Claude Code slash commands, `!` shell commands, and their output | Output is dropped, and so is a slash command without arguments, which never becomes the conversation title. What the user typed is kept as plain `/name args` or `!command` | Imported as user messages with their XML wrappers |
 | Header on each imported message | `[Historical <source> · YYYY-MM-DD HH:MMZ · <title>]`. The conversation id stays in the structured origin | Adds the conversation id and a full ISO timestamp, about twice as long |

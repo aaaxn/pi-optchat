@@ -29,12 +29,14 @@ export function timestamp(value: unknown, fallback: string): string {
 /** Header time: minutes are enough to place a message, and the rest of an ISO stamp costs summary bytes. */
 const minute = (date: string) => `${date.slice(0, 16).replace('T', ' ')}Z`;
 /**
- * Claude Code logs slash commands and their local output as user messages. Returns undefined for anything
- * else, '' for scaffolding to drop, or `/name args` when the user typed arguments, which are a real request.
+ * Claude Code logs slash commands, `!` shell commands, and their local output as user messages. Returns undefined
+ * for anything else, '' for scaffolding to drop, or what the user typed (`/name args`, `!command`), a real request.
  */
 export function claudeCommand(content: string): string | undefined {
   const s = content.trimStart();
-  if (/^<local-command-(stdout|stderr)>/.test(s)) return '';
+  if (/^<(local-command|bash)-(stdout|stderr)>/.test(s)) return '';
+  const shell = /^<bash-input>([\s\S]*?)<\/bash-input>/.exec(s)?.[1].trim();
+  if (shell !== undefined) return shell && `!${shell}`;
   if (!/^<command-(name|message|args)>/.test(s)) return undefined;
   const name = /<command-name>([^<]*)<\/command-name>/.exec(s)?.[1].trim(), args = /<command-args>([\s\S]*?)<\/command-args>/.exec(s)?.[1].trim();
   return name && args ? `${name} ${args}` : '';
