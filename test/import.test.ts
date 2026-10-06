@@ -423,3 +423,15 @@ test('preparation source dialog receives shutdown cancellation before staging an
     assert.equal(await task, undefined); assert.equal(pendingImport(dir), undefined);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('a time without a zone is UTC whatever the machine zone, and an out-of-range time falls back without throwing', () => {
+  const zone = process.env.TZ;
+  process.env.TZ = 'America/Sao_Paulo';
+  try {
+    assert.equal(timestamp('2026-01-02T12:00:00', 'x'), '2026-01-02T12:00:00.000Z');
+    assert.equal(timestamp('2026-01-02 12:00', 'x'), '2026-01-02T12:00:00.000Z');
+    assert.equal(timestamp('2026-01-02T12:00:00-03:00', 'x'), '2026-01-02T15:00:00.000Z');
+    assert.equal(timestamp(1767355200, 'x'), '2026-01-02T12:00:00.000Z');
+    for (const bad of [1e13, -1e13, NaN, Infinity, 'not a time', undefined, null]) assert.equal(timestamp(bad, 'fallback'), 'fallback');
+  } finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }
+});

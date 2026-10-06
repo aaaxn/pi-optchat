@@ -39,9 +39,12 @@ const string = (v: unknown) => typeof v === 'string' ? v : undefined;
 const codexSubagent = ({ source }: Record<string, unknown>) => source === 'subagent' || record(source) && 'subagent' in source;
 const missingSource = (error: unknown) => record(error) && (error.code === 'ENOENT' || error.code === 'ENOTDIR');
 const missingWarning = (file: string) => `${file}: source file is no longer available; conversation skipped. Rescan to retry if it returns.`;
+const zoneless = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)$/;
+/** A time without a zone is UTC, not the machine's zone. A value that is not a valid time gives the fallback. */
 export function timestamp(value: unknown, fallback: string): string {
-  const time = typeof value === 'number' ? value * 1000 : typeof value === 'string' ? Date.parse(value) : NaN;
-  return Number.isFinite(time) ? new Date(time).toISOString() : fallback;
+  const time = typeof value === 'number' ? value * 1000 : typeof value === 'string' ? Date.parse(value.trim().replace(zoneless, '$1T$2Z')) : NaN;
+  const date = new Date(time);
+  return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
 }
 /** Header time: minutes are enough to place a message, and the rest of an ISO stamp costs summary bytes. */
 const minute = (date: string) => `${date.slice(0, 16).replace('T', ' ')}Z`;
