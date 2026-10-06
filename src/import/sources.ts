@@ -182,17 +182,18 @@ const claude: Adapter = {
     // Import user conversations, not separate delegated runs (including Claude's older flat layout).
     skip: (folder, file) => relative(folder, dirname(file)).split(/[\\/]/).includes('subagents') || basename(file).startsWith('agent-'),
     async meta(records, meta) {
+      let id: string | undefined;
       for await (const { value: v, line } of records) {
         // Sidechain markers can appear late; picker metadata still comes from the first 60 lines.
         if (v.isSidechain === true) return undefined;
         if (line > 60) continue;
-        meta.id = string(v.sessionId) ?? meta.id;
+        id ??= string(v.sessionId);
         meta.project = string(v.cwd) ?? meta.project;
         if (v.type === 'custom-title' || v.type === 'ai-title') meta.title = string(v.customTitle ?? v.aiTitle) ?? meta.title;
         const typed = record(v.message) && v.message.role === 'user' && !meta.title ? claudeScaffold(v.message.content) : '';
         if (typed.trim()) { meta.title = typed.replace(/\s+/g, ' ').slice(0, 110); meta.date = timestamp(v.timestamp, meta.date); }
       }
-      return meta;
+      return { ...meta, id: id ?? meta.id };
     },
   }, signal),
   entries: (c, signal) => readTranscript(c, signal, (v, line, date, t, warnings) => {

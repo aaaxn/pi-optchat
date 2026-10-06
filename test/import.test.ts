@@ -456,3 +456,17 @@ test('a ChatGPT conversation with an empty or multi-line title gets a one-line h
     assert.equal(origin?.title, 'abc-def-ghi-jkl-mno');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('a resumed Claude transcript takes its id from its first record, so copied messages import once', async () => {
+  const dir = temp();
+  const user = (uuid: string, session: string, content: string) => ({ type: 'user', uuid, sessionId: session, cwd: '/project', timestamp: date, message: { role: 'user', content } });
+  const reply = (uuid: string, session: string, content: string) => ({ type: 'assistant', uuid, sessionId: session, timestamp: date, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: content }] } });
+  lines(join(dir, 'A.jsonl'), [user('u1', 'A', 'q1'), reply('a1', 'A', 'r1')]);
+  lines(join(dir, 'B.jsonl'), [user('u1', 'A', 'q1'), reply('a1', 'A', 'r1'), user('u2', 'B', 'q2'), reply('a2', 'B', 'r2')]);
+  try {
+    const scan = await adapters.claude.scan(dir);
+    assert.deepEqual(scan.conversations.map(c => c.id), ['A', 'A']);
+    const all = (await Promise.all(scan.conversations.map(c => readConversation(c)))).flatMap(parsed => parsed.entries);
+    assert.deepEqual(deduplicate([], all).added.map(e => e.text.split('\n')[1]), ['q1', 'r1', 'q2', 'r2']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
