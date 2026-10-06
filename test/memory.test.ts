@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CAP, Memory, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
+import { CAP, NODE, VIEW, Memory, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
 import { lockProfile } from '../src/profiles.ts';
 import { splitView, cachePayload, cacheFor } from '../src/cache.ts';
 import { SCALE } from '../src/compactor.ts';
@@ -45,7 +45,7 @@ test('pending compaction blocks a turn, cancellation works, failure retries', as
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')); let attempts = 0;
   const memory = new Memory(dir, async () => {
     attempts++; if (attempts === 1) throw new Error('temporary outage'); return 'user: retained decision';
-  }, () => {}, 128000, 8, 100);
+  }, () => {}, VIEW, 8, 100);
   try {
     memory.append('user', 'large message '.repeat(100));
     await assert.rejects(memory.settle(AbortSignal.timeout(20)), /cancelled/);
@@ -102,7 +102,7 @@ test('OpenAI requests keep reasoning across turns and send the view unchanged', 
 });
 
 test('the compactor scale line is one node long, realistic, and has nothing to copy', () => {
-  assert.equal(bytes(SCALE), 512);
+  assert.equal(bytes(SCALE), NODE);
   assert.doesNotMatch(SCALE, /\.{3,}$/, 'no padding');
   assert.doesNotMatch(SCALE, /[^\x20-\x7e]/, 'ASCII only, so bytes equal characters');
   assert.doesNotMatch(SCALE, /\d/, 'no ids or numbers for the compactor to copy');

@@ -17,6 +17,6 @@ export class TabTitle {
   clear() { this.title = undefined; this.set = undefined; }
   private apply() {
     if (!this.title || !this.set) return;
-    try { this.set(this.title); } catch { /* A ctx captured before a session replacement is stale; the next session sets its own. */ }
+    try { this.set(this.title); } catch {} // why: a ctx captured before a session replacement is stale; the next session sets its own title.
   }
 }
