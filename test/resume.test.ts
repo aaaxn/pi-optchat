@@ -147,11 +147,13 @@ test('a child resumed while the profile closes does not start', async () => {
     let disposed = 0;
     hooks.opened = session => { const dispose = session.dispose.bind(session); session.dispose = () => { disposed++; dispose(); }; };
     const resume = children.tell(solo, 'more');
+    const refused = assert.rejects(resume, /Profile is closing/);
     await started;
     const closing = children.close();
     hooks.beforeSession = undefined; opened();
-    await assert.rejects(resume, /Profile is closing/);
     await closing;
+    assert.equal(disposed, 1, 'close() returned while the resumed session was still being created');
+    await refused;
     assert.equal(children.live(solo), undefined);
     assert.equal(children.history.records.get(solo)?.state, 'completed');
     assert.equal(users(children, solo).length, 1, 'the cancelled child never got the message');
@@ -203,5 +205,24 @@ test('a resume whose record cannot be saved leaves the child finished and resuma
     await children.tell(solo, 'after recovery');
     await until(() => !children.active);
     assert.equal(reports.at(-1), `[${solo}] solo resumed after "solo first report" heard: after recovery`);
+  } finally { await cleanup(children); }
+});
+
+test('a tell that loses the race with the child finishing is refused, not reported as queued', async () => {
+  const { dir, hooks, releases, make, cleanup } = await setup('optchat-tell-race-');
+  const children = make('session');
+  try {
+    let open!: () => void;
+    const steering = new Promise<void>(resolve => { open = resolve; });
+    hooks.opened = session => { const steer = session.steer.bind(session); session.steer = async text => { await steering; return steer(text); }; };
+    const [id] = await children.spawn([{ task: 'hold a' }], dir);
+    await until(() => releases.has('hold a'));
+    const told = children.tell(id, 'please do X');
+    const refused = assert.rejects(told, /finished before it read the message/);
+    releases.get('hold a')!();
+    await until(() => children.history.records.get(id)?.state === 'completed');
+    open();
+    await refused;
+    assert.equal(children.history.records.get(id)?.guidance[0].state, 'undelivered');
   } finally { await cleanup(children); }
 });

@@ -25,6 +25,9 @@ const rules: Rule[] = [
     hit: node => (ts.isCatchClause(node) && emptyBlock(node.block)) ||
       (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'catch'
         && node.arguments.length === 1 && ts.isArrowFunction(node.arguments[0]) && emptyBlock(node.arguments[0].body)) },
+  { name: 'run-state-owner', exempt: /^src\/runs\.ts$/, message: 'Run state changes only through transition() in src/runs.ts.',
+    hit: node => ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && ts.isPropertyAccessExpression(node.left) && node.left.name.text === 'state' },
 ];
 
 const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
