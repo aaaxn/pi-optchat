@@ -498,7 +498,6 @@ test('Codex titles and entries skip the contextual messages Codex injects, and k
     assert.equal(parsed.entries[0].text.split('\n')[0], '[Historical codex · 2026-03-04 09:00Z · 0199c0de-1111 · Add a --dry-run flag to the sync command.]');
     assert.doesNotMatch(JSON.stringify(parsed.entries), /AGENTS\.md|environment_context|user_shell_command|<skill>|hook_prompt|codex_internal_context|turn_aborted|subagent_notification|SECRET|Reading the sync/);
     assert.deepEqual(parsed.warnings, []);
-    // Receipts hash the raw message, so a conversation imported before this filter is still recognized.
     const raw = '<environment_context>\n  <cwd>/home/dev/synthetic-app</cwd>\n</environment_context>\nNow document the flag in the README.';
     assert.equal(parsed.entries[2].receipt, receipt('codex', c.id, 'msg-3', 'user', raw));
     assert.equal(parsed.entries[0].receipt, receipt('codex', c.id, 'msg-1', 'user', 'Add a --dry-run flag to the sync command.'));

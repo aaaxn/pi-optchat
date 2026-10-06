@@ -17,21 +17,15 @@ export interface Conversation {
 }
 export interface Scan { conversations: Conversation[]; warnings: string[] }
 export interface Read { entries: ImportedEntry[]; warnings: string[] }
-/** Everything one import source decides. `adapters` must hold one per `Source`, so a new source fails to compile until it has every part. */
 export interface Adapter {
-  /** Source picker row. */
   label: string;
-  /** Words the picker uses for what this source holds. */
   words: { plural: string; singular: string; item: string; preview: string };
-  /** Whether the picker asks which projects to import. */
   byProject: boolean;
-  /** Prompt for the path to import from. A source that reads fixed local folders has none. */
   input?: string;
-  /** Lists what can be imported. `location` is the path the user typed, or a folder that replaces the default one. */
+  /** `location` is the path the user typed, or a folder that replaces the default one. */
   scan(location: string | undefined, signal?: AbortSignal): Promise<Scan>;
-  /** The importable messages of one scanned conversation. */
   entries(c: Conversation, signal?: AbortSignal): Promise<Read>;
-  /** What the user typed in a user message: '' when it holds only this source's own scaffolding. Titles and entries both read it. */
+  /** What the user typed in a user message: '' when it holds only this source's own scaffolding. */
   scaffold(content: unknown): string;
 }
 const exec = promisify(execFile);
@@ -40,7 +34,7 @@ const codexSubagent = ({ source }: Record<string, unknown>) => source === 'subag
 const missingSource = (error: unknown) => record(error) && (error.code === 'ENOENT' || error.code === 'ENOTDIR');
 const missingWarning = (file: string) => `${file}: source file is no longer available; conversation skipped. Rescan to retry if it returns.`;
 const zoneless = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)$/;
-/** A time without a zone is UTC, not the machine's zone. A value that is not a valid time gives the fallback. */
+/** A time without a zone is UTC, not the machine's zone. */
 export function timestamp(value: unknown, fallback: string): string {
   const time = typeof value === 'number' ? value * 1000 : typeof value === 'string' ? Date.parse(value.trim().replace(zoneless, '$1T$2Z')) : NaN;
   const date = new Date(time);
@@ -127,7 +121,6 @@ async function filesUnder(path: string, accept: (name: string) => boolean, signa
 interface Meta { id: string; project: string; date: string; title: string }
 interface Transcripts {
   folders: string[]; accept(name: string): boolean; skip?(folder: string, file: string): boolean;
-  /** Reads the file's first `limit` lines. Returns what the picker shows, or undefined to skip a delegated run. */
   limit: number; meta(records: Records, meta: Meta): Promise<Meta | undefined>;
 }
 async function scanTranscripts(source: 'claude' | 'codex', t: Transcripts, signal?: AbortSignal): Promise<Scan> {
@@ -163,7 +156,6 @@ function turns(c: Conversation) {
   };
 }
 type Turns = ReturnType<typeof turns>;
-/** `step` returns 'drop' when the whole conversation is not importable (a delegated run). */
 async function readTranscript(c: Conversation, signal: AbortSignal | undefined, step: (v: Record<string, unknown>, line: number, date: string, t: Turns, warnings: string[]) => 'drop' | void): Promise<Read> {
   const warnings: string[] = [], t = turns(c);
   try {
@@ -174,7 +166,6 @@ async function readTranscript(c: Conversation, signal: AbortSignal | undefined, 
   } catch (error) {
     signal?.throwIfAborted();
     if (!missingSource(error)) throw error;
-    // Do not stage a partial conversation if the source becomes unavailable mid-read.
     return { entries: [], warnings: [...warnings, missingWarning(c.file)] };
   }
   return { entries: t.entries, warnings };
