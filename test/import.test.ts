@@ -575,21 +575,26 @@ test('a source added to Origin without an adapter fails tsc', () => {
   assert.match(failures[0], /does not satisfy the expected type 'Record<[^>]*"slack"[^>]*, Adapter>'[\s\S]*Property 'slack' is missing/);
 });
 
-test('lint rejects a comparison of an import source with a name outside the adapter table, and only under src/import', () => {
+test('lint rejects a comparison of an import source with its name anywhere in src except the adapter table, and ignores other sources', () => {
   const root = temp();
   for (const dir of ['src/import', 'test']) mkdirSync(join(root, dir), { recursive: true });
-  writeFileSync(join(root, 'src/import/branch.ts'), [
+  const compare = [
     "export const a = (c: { source: string }) => c.source === 'claude';",
     "export const b = (c: { source: string }) => 'codex' !== c.source;",
     "export const d = (c: { source: string }) => { switch (c.source) { case 'chatgpt': return 1; default: return 0; } };",
     "export const kept = (c: { source: string; id: string }, other: string) => c.source === other || c.id === 'claude' || other === 'claude';",
-  ].join('\n') + '\n');
+  ].join('\n') + '\n';
+  writeFileSync(join(root, 'src/import/sources.ts'), compare);
+  writeFileSync(join(root, 'src/import/branch.ts'), compare);
+  writeFileSync(join(root, 'src/outside.ts'), "export const tell = (c: { source: string }) => c.source === 'claude-memory';\n");
   writeFileSync(join(root, 'src/agents.ts'), "export const tell = (event: { source: string }) => event.source === 'extension';\n");
   try {
     const run = (() => { try { return execFileSync(process.execPath, ['--import', 'tsx', join(repo, 'scripts/lint.ts'), root], { cwd: repo, encoding: 'utf8' }); } catch (error) { return record(error) ? String(error.stdout) : ''; } })();
     const message = 'Per-source behavior lives in the adapter table in src/import/sources.ts.';
-    assert.deepEqual(run.split('\n').filter(line => line.startsWith('src/')),
-      [1, 2, 3].map(line => `src/import/branch.ts:${line} source-branch ${message}`));
+    assert.deepEqual(run.split('\n').filter(line => line.startsWith('src/')), [
+      ...[1, 2, 3].map(line => `src/import/branch.ts:${line} source-branch ${message}`),
+      `src/outside.ts:1 source-branch ${message}`,
+    ]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

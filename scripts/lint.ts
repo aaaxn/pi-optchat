@@ -16,6 +16,8 @@ const exceptions: Exception[] = [
 const lineOf = (sf: ts.SourceFile, pos: number) => sf.getLineAndCharacterOfPosition(pos).line;
 const emptyBlock = (node: ts.Node) => ts.isBlock(node) && node.statements.length === 0;
 
+const importSources = [...readFileSync(join(import.meta.dirname, '../src/memory.ts'), 'utf8').match(/interface Origin \{ source: ([^;]*);/)?.[1].matchAll(/'([^']+)'/g) ?? []].map(match => match[1]);
+
 const rules: Rule[] = [
   { name: 'import-guidance-owner', exempt: /^(src\/(profiles|compactor)\.ts|test\/fork\.test\.ts)$/, message: 'Agent instructions come from agentInstructions() in src/profiles.ts.',
     hit: node => ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && /(^|\/)guidance(\.ts)?$/.test(node.moduleSpecifier.text) },
@@ -32,12 +34,13 @@ const rules: Rule[] = [
       && ts.isPropertyAccessExpression(node.left) && node.left.name.text === 'state' },
   { name: 'test-sandbox', exempt: /^(?!test\/[^/]+\.test\.ts$)|^test\/support\.test\.ts$/, message: "A test file imports './support.ts' (or './fakes.ts') so a single-file run is sandboxed from the real home. Add `import './support.ts';` as its first line.",
     hit: node => ts.isSourceFile(node) && !node.statements.some(statement => ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier) && ['./support.ts', './fakes.ts'].includes(statement.moduleSpecifier.text)) },
-  { name: 'source-branch', exempt: /^(?!src\/import\/)/, message: 'Per-source behavior lives in the adapter table in src/import/sources.ts.',
+  { name: 'source-branch', exempt: /^src\/import\/sources\.ts$/, message: 'Per-source behavior lives in the adapter table in src/import/sources.ts.',
     hit: node => {
       const isSource = (n: ts.Node) => ts.isPropertyAccessExpression(n) && n.name.text === 'source';
+      const isName = (n: ts.Node) => ts.isStringLiteralLike(n) && importSources.includes(n.text);
       const equality = [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken];
-      return ts.isBinaryExpression(node) && equality.includes(node.operatorToken.kind) && [node.left, node.right].some(isSource) && [node.left, node.right].some(ts.isStringLiteralLike)
-        || ts.isCaseClause(node) && ts.isStringLiteralLike(node.expression) && isSource(node.parent.parent.expression);
+      return ts.isBinaryExpression(node) && equality.includes(node.operatorToken.kind) && [node.left, node.right].some(isSource) && [node.left, node.right].some(isName)
+        || ts.isCaseClause(node) && isName(node.expression) && isSource(node.parent.parent.expression);
     } },
 ];
 
