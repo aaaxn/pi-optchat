@@ -82,6 +82,19 @@ test('a second writer on one profile is refused before it writes, and the profil
   finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a second writer that has seen today\'s file is refused after the other appends to it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), compress = async () => 'summary';
+  const first = new Memory(dir, compress, () => {}); first.append('user', 'one');
+  const second = new Memory(dir, compress, () => {});
+  try {
+    first.append('user', 'two');
+    assert.throws(() => second.append('user', 'three'), /Another process wrote .*nothing was written/);
+  } finally { await first.close(); await second.close(); }
+  const reopened = new Memory(dir, compress, () => {});
+  try { assert.deepEqual(reopened.root.map(e => e.text), ['one', 'two']); }
+  finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('a day file that another process created first is caught, and an ordinary midnight rollover is not', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), compress = async () => 'summary';
   mock.timers.enable({ apis: ['Date'], now: new Date(2026, 0, 1, 23, 59) });
@@ -99,6 +112,22 @@ test('a day file that another process created first is caught, and an ordinary m
   } finally { mock.timers.reset(); await Promise.all(opened.map(m => m.close())); }
   const reopened = new Memory(dir, compress, () => {});
   try { assert.deepEqual(reopened.root.map(e => e.text), ['before midnight', 'after midnight', 'b on the third', 'b again']); }
+  finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a second writer whose first write starts a new day file is refused when the other wrote an older day file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), compress = async () => 'summary';
+  mock.timers.enable({ apis: ['Date'], now: new Date(2026, 0, 1, 12) });
+  const opened: Memory[] = [];
+  try {
+    const a = new Memory(dir, compress, () => {}), b = new Memory(dir, compress, () => {}); opened.push(a, b);
+    a.append('user', 'a on the first');
+    mock.timers.setTime(new Date(2026, 0, 2, 12).getTime());
+    assert.throws(() => b.append('user', 'b on the second'), /Another process wrote .*2026-01-02\.jsonl.*nothing was written/);
+    assert.equal(b.root.length, 0);
+  } finally { mock.timers.reset(); await Promise.all(opened.map(m => m.close())); }
+  const reopened = new Memory(dir, compress, () => {});
+  try { assert.deepEqual(reopened.root.map(e => e.text), ['a on the first']); }
   finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

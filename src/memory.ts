@@ -1,5 +1,5 @@
 import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
 export const NODE = 512;
@@ -30,11 +30,12 @@ export function cap(text: string, limit = CAP) {
 export function localDay(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
+const otherWriter = (file: string) => new Error(`Another process wrote ${file}. Close every other Pi on this profile and restart Pi; nothing was written.`);
 /** With `size`, refuses to append unless the file still has that size. Returns the new size. */
 export function appendJson(file: string, value: unknown, size?: number) {
   const fd = openSync(file, 'a', 0o600);
   try {
-    if (size !== undefined && fstatSync(fd).size !== size) throw new Error(`Another process wrote ${file}. Close every other Pi on this profile and restart Pi; nothing was written.`);
+    if (size !== undefined && fstatSync(fd).size !== size) throw otherWriter(file);
     const data = Buffer.from(JSON.stringify(value) + '\n');
     if (writeSync(fd, data) !== data.length) throw new Error(`Incomplete write: ${file}`);
     fsyncSync(fd);
@@ -112,10 +113,15 @@ export class Memory {
     for (let i = 0; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
     this.schedule();
   }
+  private checkLog(next: string) {
+    const main = dirname(next), names = readdirSync(main).filter(n => n.endsWith('.jsonl'));
+    if (names.length !== this.lastSeenBytes.size || names.some(n => statSync(join(main, n)).size !== this.lastSeenBytes.get(join(main, n)))) throw otherWriter(next);
+  }
   append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string) {
     if (this.stopped) throw new Error('Memory is closed.');
     const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}) };
     const file = join(this.directory, 'main', `${localDay()}.jsonl`);
+    if (!this.lastSeenBytes.has(file)) this.checkLog(file);
     this.lastSeenBytes.set(file, appendJson(file, entry, this.lastSeenBytes.get(file) ?? 0));
     this.root.push(entry); this.push(entry.i); this.fit(); this.schedule();
     return entry;
