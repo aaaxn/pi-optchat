@@ -11,7 +11,7 @@ The source remains upstream rather than duplicating the full article here. Its f
 ## Implementation mapping
 
 - `src/memory.ts`: append-only log, binary summary tree, compression scheduling, bounded view, zoom/date.
-- `src/compactor.ts`: contextual compression and size retries.
+- `src/compactor.ts`: contextual compression, size retries, and one primer call per cold Anthropic prefix so the parallel calls read the cache instead of each writing it.
 - `src/cache.ts`: stable Anthropic cache boundaries.
 - `src/transcript.ts`: builds the context of a parent run (view plus new input), current-run tool loop retained.
 - `src/turn.ts`: the state of a parent run. It waits in `settle` until every view line is a summary, captures the view once per run, logs each message, and journals pending subagent reports.

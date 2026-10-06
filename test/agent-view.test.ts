@@ -8,7 +8,7 @@ import { createAssistantMessageEventStream, type AssistantMessage } from '@earen
 import { ModelRuntime, SessionManager, initTheme } from '@earendil-works/pi-coding-agent';
 import { TuiMainScreen, visibleWidth, type Terminal, type TuiMouseEvent } from '@earendil-works/pi-tui';
 import { Memory } from '../src/memory.ts';
-import { AgentView, TranscriptView } from '../src/agent-view.ts';
+import { AgentView, TranscriptView, hideImagesUnderOverlays } from '../src/agent-view.ts';
 import { textContent } from '../src/transcript.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { emptyUsage } from '../src/usage.ts';
@@ -16,7 +16,7 @@ import { emptyUsage } from '../src/usage.ts';
 initTheme('dark', false);
 
 class OffscreenTerminal implements Terminal {
-  start() {} stop() {} async drainInput() {} write() {}
+  start() {} stop() {} async drainInput() {} write(_data: string) {}
   get columns() { return 100; } get rows() { return 30; } get kittyProtocolActive() { return false; }
   moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {}
 }
@@ -164,4 +164,23 @@ test('agent view drives a running agent: streaming, guidance from the input, dra
     view.handleInput('\x1b');
     assert.equal(closed, 1);
   } finally { view.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('main-chat images are hidden under the agent view and come back after', async () => {
+  let written = '';
+  const terminal = new (class extends OffscreenTerminal { override write(data: string) { written += data; } })();
+  const tui = new TuiMainScreen(terminal);
+  const image = '\x1b_Ga=T,f=100,q=2;IMAGE_BYTES\x1b\\';
+  tui.addChild({ render: () => ['main chat', image], invalidate() {} });
+  const frame = async () => { written = ''; tui.requestRender(true); await new Promise(resolve => setImmediate(resolve)); return written; };
+  const overlay = tui.showOverlay({ render: width => Array.from({ length: 30 }, () => 'V'.repeat(width)), invalidate() {} }, { width: '100%', maxHeight: '100%', row: 0, col: 0 });
+  const restore = hideImagesUnderOverlays(tui);
+  try {
+    const covered = await frame();
+    assert.doesNotMatch(covered, /IMAGE_BYTES/);
+    assert.equal(covered.match(/V{100}/g)?.length, 30, 'every row shows the view');
+  } finally { restore(); }
+  overlay.hide();
+  assert.match(await frame(), /IMAGE_BYTES/);
+  tui.stop();
 });
