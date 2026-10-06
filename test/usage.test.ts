@@ -65,3 +65,34 @@ test('recent ranges use local midnight and a rolling seven days without attribut
     assert.equal(ledger.select('This session', 'x', now).length, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('All time keeps entries dated after now', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-usage-'));
+  const now = Date.now();
+  try {
+    const ledger = new UsageLedger(dir);
+    ledger.add({ id: 'future', date: new Date(now + 3600_000).toISOString(), role: 'main', model: 'test', session: 's', usage: emptyUsage() });
+    assert.equal(ledger.select('All time', 's', now).length, 1);
+    assert.equal(ledger.select('Last hour', 's', now).length, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('add rejects a record that a reload would reject, so totals match after a restart', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-usage-'));
+  const now = Date.now();
+  try {
+    const ledger = new UsageLedger(dir);
+    const good = { ...emptyUsage(), totalTokens: 7, cost: { ...emptyUsage().cost, total: 0.5 } };
+    ledger.add({ id: 'good', date: new Date(now).toISOString(), role: 'main', model: 'test', usage: good });
+    ledger.add({ id: 'nan', date: new Date(now).toISOString(), role: 'main', model: 'test', usage: { ...good, cost: { ...good.cost, total: NaN } } });
+    ledger.add({ id: 'negative', date: new Date(now).toISOString(), role: 'main', model: 'test', usage: { ...good, input: -1 } });
+    ledger.add({ id: 'date', date: 'yesterday', role: 'main', model: 'test', usage: good });
+    assert.equal(ledger.entries.length, 1);
+    assert.equal(ledger.warnings.length, 1);
+    const live = summarizeUsage(ledger.select('All time', '', now)).total;
+    const reloaded = new UsageLedger(dir);
+    assert.deepEqual(summarizeUsage(reloaded.select('All time', '', now)).total, live);
+    assert.deepEqual(reloaded.warnings, []);
+    assert.equal(live.cost.total, 0.5);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
