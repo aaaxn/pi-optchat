@@ -326,16 +326,19 @@ const chatgpt: Adapter = {
     const nodes = Object.entries(mapping).filter((pair): pair is [string, Record<string, unknown>] => record(pair[1]));
     nodes.sort((a, b) => timestamp(record(a[1].message) ? a[1].message.create_time : undefined, c.date)
       .localeCompare(timestamp(record(b[1].message) ? b[1].message.create_time : undefined, c.date)));
-    const ordered: typeof nodes = [], visited = new Set<string>(), visiting = new Set<string>();
-    const visit = (key: string, node: Record<string, unknown>) => {
-      if (visited.has(key)) return;
-      if (visiting.has(key)) throw new Error(`${c.title}: cycle in ChatGPT conversation mapping.`);
-      visiting.add(key);
-      const parent = typeof node.parent === 'string' ? mapping[node.parent] : undefined;
-      if (typeof node.parent === 'string' && record(parent)) visit(node.parent, parent);
-      visiting.delete(key); visited.add(key); ordered.push([key, node]);
-    };
-    for (const [key, node] of nodes) visit(key, node);
+    const ordered: typeof nodes = [], visited = new Set<string>();
+    for (const first of nodes) {
+      const chain: typeof nodes = [], inChain = new Set<string>();
+      let link: (typeof nodes)[number] | undefined = first;
+      while (link && !visited.has(link[0])) {
+        const [key, node]: (typeof nodes)[number] = link;
+        if (inChain.has(key)) throw new Error(`${c.title}: cycle in ChatGPT conversation mapping.`);
+        inChain.add(key); chain.push(link);
+        const parent = typeof node.parent === 'string' ? mapping[node.parent] : undefined;
+        link = typeof node.parent === 'string' && record(parent) ? [node.parent, parent] : undefined;
+      }
+      for (const done of chain.reverse()) { visited.add(done[0]); ordered.push(done); }
+    }
     const selected = new Set<string>();
     let cursor = string(c.exported?.current_node);
     const hasSelectedBranch = !!cursor;

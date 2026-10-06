@@ -520,3 +520,16 @@ test('Codex scaffold drops only the fragments Codex itself marks as injected con
   assert.equal(scaffold([{ type: 'input_text', text: '<environment_context>x</environment_context>' }, { type: 'input_text', text: 'real' }, { type: 'input_image' }]),
     'real\n[image attachment; image bytes are not imported]');
 });
+
+test('a ChatGPT conversation with a very long chain of replies imports in order, and a parent cycle is still rejected', async () => {
+  const nodes = 20_000, mapping: Record<string, unknown> = {};
+  for (let i = nodes - 1; i >= 0; i--) mapping[`n${i}`] = { parent: i ? `n${i - 1}` : null,
+    message: { id: `m${i}`, author: { role: i % 2 ? 'assistant' : 'user' }, end_turn: true, content: { parts: [`message ${i}`] } } };
+  const chat = (exported: Record<string, unknown>) => ({ ...conversation('chatgpt', 'export.json'), exported });
+  const parsed = await readConversation(chat({ mapping, current_node: `n${nodes - 1}` }));
+  assert.equal(parsed.entries.length, nodes + 1);
+  assert.deepEqual(parsed.entries.slice(0, 3).map(e => e.origin?.message), ['m0', 'm1', 'm2']);
+  assert.equal(parsed.entries.at(-1)?.origin?.message, 'export:selected-branch');
+  const loop = { a: { parent: 'b', message: { author: { role: 'user' }, content: { parts: ['a'] } } }, b: { parent: 'a', message: { author: { role: 'user' }, content: { parts: ['b'] } } } };
+  await assert.rejects(readConversation(chat({ mapping: loop })), /cycle in ChatGPT conversation mapping/);
+});
