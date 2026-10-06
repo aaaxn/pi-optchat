@@ -49,8 +49,8 @@ test('a turn sends the view and the new message, never the previous exchange', (
     timestamp: at, stopReason: 'stop', usage: emptyUsage() };
   const previous = [{ role: 'user' as const, content: 'earlier request', timestamp: at }, earlier];
   const current = { role: 'user' as const, content: 'new request', timestamp: at };
-  const context = Reflect.apply(transcript.buildContext, undefined, [[], [current], '<chat>\nsummary\n</chat>', 'prompt', previous]);
-  assert.deepEqual(context, transcript.buildContext([], [current], '<chat>\nsummary\n</chat>', 'prompt'), design('Turn context'));
+  const context = Reflect.apply(transcript.buildContext, undefined, [[], [current], 'view of summaries', 'prompt', previous]);
+  assert.deepEqual(context, transcript.buildContext([], [current], 'view of summaries', 'prompt'), design('Turn context'));
 });
 
 test('a subagent gets zoom, date and tell_parent beside Pi\'s built-ins, and cannot spawn or tell', async () => {

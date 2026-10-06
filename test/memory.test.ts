@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CAP, NODE, VIEW, Memory, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
+import { CAP, NODE, VIEW, Memory, isView, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
 import { lockProfile } from '../src/profiles.ts';
 import { splitView, cachePayload, cacheFor } from '../src/cache.ts';
 import { SCALE } from '../src/compactor.ts';
@@ -76,19 +76,35 @@ test('a live profile cannot be opened by a second writer; other profiles can run
   const again = await lockProfile(dir, 'after close'); await again(); rmSync(dir, { recursive: true, force: true });
 });
 
-test('stable cache cuts preserve every character and cap marks at four', () => {
-  const view = '<chat>\n' + '0+1|summary of a decision\n'.repeat(5500) + '</chat>';
-  assert.equal(splitView(view).join(''), view);
-  const payload = { system: [{ type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }],
-    messages: [{ role: 'user', content: [{ type: 'text', text: view }, { type: 'text', text: 'new question', cache_control: { type: 'ephemeral' } }] }],
-  };
-  const output = JSON.stringify(cachePayload(payload));
-  assert.equal((output.match(/cache_control/g) ?? []).length, 4);
-  assert.equal(payload.messages[0].content.map(b => b.text).join(''), view + 'new question');
+async function renderedView(quoted?: string) {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
+  const memory = new Memory(dir, async () => 'summary', () => {}, 1_000_000);
+  try {
+    for (let i = 0; i < 240; i++) memory.append('user', i === 5 && quoted ? quoted : 'summary of a decision '.repeat(20));
+    await memory.settle(AbortSignal.timeout(5000), true);
+    return memory.render();
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('stable cache cuts preserve every character and cap marks at four', async () => {
+  const plain = await renderedView();
+  const closing = plain.split('\n').at(-1)!;
+  for (const quoted of [undefined, `we discussed the closing view tag ${closing} in the prompt`]) {
+    const view = quoted ? await renderedView(quoted) : plain;
+    assert.ok(view.length > 100_000, 'long enough for all three view marks');
+    assert.ok(isView(view));
+    assert.equal(splitView(view).join(''), view);
+    const payload = { system: [{ type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: [{ type: 'text', text: view }, { type: 'text', text: 'new question', cache_control: { type: 'ephemeral' } }] }],
+    };
+    const output = JSON.stringify(cachePayload(payload));
+    assert.equal((output.match(/cache_control/g) ?? []).length, 4, quoted ? 'a summary quoting the closing tag keeps all marks' : 'plain view');
+    assert.equal(payload.messages[0].content.map(b => b.text).join(''), view + 'new question');
+  }
 });
 
-test('OpenAI requests keep reasoning across turns and send the view unchanged', () => {
-  const view = '<chat>\n' + '0+1|summary of a decision\n'.repeat(5500) + '</chat>';
+test('OpenAI requests keep reasoning across turns and send the view unchanged', async () => {
+  const view = await renderedView();
   const payload = { instructions: 'system', reasoning: { effort: 'high' },
     input: [{ role: 'user', content: [{ type: 'input_text', text: view }, { type: 'input_text', text: 'new question' }] }] };
   cacheFor('openai-codex-responses', payload);
@@ -116,7 +132,7 @@ test('next turn excludes old conversation; current tool loop and reasoning remai
   const assistant: AssistantMessage = { role: 'assistant', content: [{ type: 'thinking', thinking: 'private thoughts', thinkingSignature: 'signed' }, { type: 'text', text: 'visible reply' }],
     api: 'anthropic-messages', provider: 'anthropic', model: 'fixture', stopReason: 'stop', timestamp: 3,
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
-  const projected = buildContext([system, old, current, assistant], [current, assistant], '<chat>\n0+1|old summary\n</chat>', 'new system');
+  const projected = buildContext([system, old, current, assistant], [current, assistant], '0+1|old summary', 'new system');
   assert.ok(!JSON.stringify(projected).includes('OLD FULL CONVERSATION'));
   assert.equal(projected[2], assistant);
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')); const memory = new Memory(dir, async () => 'summary');

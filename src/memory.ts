@@ -19,6 +19,8 @@ export const end = (part: Part) => start(part) + 2 ** part.l;
 export const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
 const UNBUILT_BYTES = bytes(UNBUILT);
 export const flat = (s: string) => s.replace(/[\r\n]+/g, ' ');
+const VIEW_OPEN = '<chat>\n';
+export const isView = (text: string) => text.startsWith(VIEW_OPEN);
 export function cap(text: string, limit = CAP) {
   if (text.length <= limit) return text;
   const notice = `\n[${text.length - limit} characters omitted; head and tail retained]\n`;
@@ -115,7 +117,7 @@ export class Memory {
   private text(part: Part) { return this.node(part)?.text ?? UNBUILT; }
   private partBytes(part: Part) { return this.node(part)?.size ?? UNBUILT_BYTES; }
   private push(i: number) { const part = { l: 0, i }; this.view.push(part); this.viewBytes += this.partBytes(part); }
-  render() { return `<chat>\n${this.view.map(p => `${start(p)}+${2 ** p.l}|${flat(this.text(p))}`).join('\n')}\n</chat>`; }
+  render() { return `${VIEW_OPEN}${this.view.map(p => `${start(p)}+${2 ** p.l}|${flat(this.text(p))}`).join('\n')}\n</chat>`; }
   get ready() { return this.view.every(p => this.node(p)); }
   get pending() { return this.root.length - this.leaves; }
   get active() { return this.busy.size; }

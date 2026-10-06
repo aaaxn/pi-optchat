@@ -25,10 +25,10 @@ test('context holds the view and the current run only, never an earlier exchange
   const current = user('Why is that?');
   const thinking = answer('Working on the follow-up.');
   thinking.content.unshift({ type: 'thinking', thinking: 'CURRENT REASONING' });
-  const context = buildContext([...history, current, thinking], [current, thinking], '<chat>\nsummary\n</chat>', 'instructions');
+  const context = buildContext([...history, current, thinking], [current, thinking], 'view of summaries', 'instructions');
   assert.deepEqual(context.map(m => m.role), ['system', 'user', 'assistant']);
   assert.ok(context[1].role === 'user');
-  assert.equal(textContent(context[1].content), '<chat>\nsummary\n</chat>\nWhy is that?');
+  assert.equal(textContent(context[1].content), 'view of summaries\nWhy is that?');
   assert.equal(context.at(-1), thinking);
   assert.doesNotMatch(JSON.stringify(context), /OLD TOOL OUTPUT|Older question|Older answer|Second option/);
   assert.throws(() => buildContext(history, [], 'view', 'prompt'), /no current user message/);
@@ -55,7 +55,7 @@ test('real Pi lifecycle starts every turn from the view alone, across tool calls
       snapshot.messages = snapshot.messages.filter(m => m.role !== 'system');
       if (!compression) captured.push(snapshot);
       const latest = context.messages.at(-1);
-      const text = textContent(latest?.content).split('</chat>').at(-1)!.trim();
+      const text = textContent(Array.isArray(latest?.content) ? latest.content.slice(-1) : latest?.content).trim();
       const reply = answer(compression ? 'Summary of fixture exchanges.' : latest?.role === 'toolResult' ? 'Because Append preserves existing summaries.' : `Answer to: ${text}`);
       reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
       if (text === 'Why is that?') {

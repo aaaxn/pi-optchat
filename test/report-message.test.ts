@@ -52,14 +52,15 @@ test('a report reaches an idle or busy main agent as a user message to the model
     saveConfig(profilePath('fixture'), { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
     const runtime = await fakeRuntime(dir, fakeProvider((model, context) => {
       const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
-      const text = textContent(context.messages.at(-1)?.content);
+      const content = context.messages.at(-1)?.content;
+      const text = textContent(content);
       if (!compression) {
         const snapshot = structuredClone(context);
         systems.push(textContent(snapshot.messages.find(m => m.role === 'system')?.content));
         snapshot.messages = snapshot.messages.filter(m => m.role !== 'system');
         captured.push(snapshot);
       }
-      const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: compression ? 'Summary.' : `Answer to: ${text.split('</chat>').at(-1)?.trim()}` }],
+      const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: compression ? 'Summary.' : `Answer to: ${textContent(Array.isArray(content) ? content.slice(-1) : content).trim()}` }],
         timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
       const stream = createAssistantMessageEventStream();
       void (async () => {
