@@ -402,3 +402,44 @@ test('a log whose day files sort against the order of the entries still opens, a
     assert.throws(() => new Memory(dir, compress, () => {}), /noncontiguous/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('an append ends an unterminated last line, in every file, and counts the byte it wrote', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-torn-')), file = join(dir, 'log.jsonl');
+  try {
+    appendJson(file, { n: 1 }); appendFileSync(file, '{"n":');
+    const size = appendJson(file, { n: 2 });
+    assert.equal(readFileSync(file, 'utf8'), '{"n":1}\n{"n":\n{"n":2}\n');
+    assert.equal(size, readFileSync(file).length);
+    assert.equal(appendJson(file, { n: 3 }, size), readFileSync(file).length);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a torn tail that Memory loaded is repaired by its next append without tripping the write guard', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-torn-')), compress = async () => 'summary', warnings: string[] = [];
+  let memory = new Memory(dir, compress, () => {});
+  memory.append('user', 'first'); await memory.close();
+  const file = join(dir, 'main', `${localDay()}.jsonl`);
+  appendFileSync(file, '{"i":1,"kind":"user","te');
+  const torn = readFileSync(file, 'utf8');
+  memory = new Memory(dir, compress, text => warnings.push(text));
+  try {
+    assert.equal(readFileSync(file, 'utf8'), torn, 'opening a profile writes nothing');
+    memory.append('user', 'second'); memory.append('user', 'third');
+    assert.equal(warnings.length, 1);
+  } finally { await memory.close(); }
+  memory = new Memory(dir, compress, () => {});
+  try { assert.deepEqual(memory.root.map(e => e.text), ['first', 'second', 'third']); }
+  finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a torn tail that another process wrote is refused, not repaired', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-torn-')), memory = new Memory(dir, async () => 'summary', () => {});
+  try {
+    memory.append('user', 'first');
+    const file = join(dir, 'main', `${localDay()}.jsonl`);
+    appendFileSync(file, '{"i":1,"kind":"user","te');
+    const before = readFileSync(file, 'utf8');
+    assert.throws(() => memory.append('user', 'second'), /Another process wrote .*nothing was written/);
+    assert.equal(readFileSync(file, 'utf8'), before);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});

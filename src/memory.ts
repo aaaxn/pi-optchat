@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
@@ -31,12 +31,14 @@ export function localDay(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 const otherWriter = (file: string) => new Error(`Another process wrote ${file}. Close every other Pi on this profile and restart Pi; nothing was written.`);
-/** With `size`, refuses to append unless the file still has that size. Returns the new size. */
+/** With `size`, refuses to append unless the file still has that size. A last line left without its newline is ended first. Returns the new size. */
 export function appendJson(file: string, value: unknown, size?: number) {
-  const fd = openSync(file, 'a', 0o600);
+  const fd = openSync(file, 'a+', 0o600);
   try {
-    if (size !== undefined && fstatSync(fd).size !== size) throw otherWriter(file);
-    const data = Buffer.from(JSON.stringify(value) + '\n');
+    const length = fstatSync(fd).size, last = Buffer.alloc(1);
+    if (size !== undefined && length !== size) throw otherWriter(file);
+    const torn = length > 0 && readSync(fd, last, 0, 1, length - 1) === 1 && last[0] !== 0x0a;
+    const data = Buffer.from((torn ? '\n' : '') + JSON.stringify(value) + '\n');
     if (writeSync(fd, data) !== data.length) throw new Error(`Incomplete write: ${file}`);
     fsyncSync(fd);
     return fstatSync(fd).size;
@@ -47,15 +49,10 @@ function records(dir: string, warn: (s: string) => void): unknown[] {
   const result: unknown[] = [];
   for (const name of readdirSync(dir).filter(n => n.endsWith('.jsonl')).sort()) {
     const file = join(dir, name);
-    const text = readFileSync(file, 'utf8');
-    for (const [index, line] of text.split('\n').entries()) {
+    for (const [index, line] of readFileSync(file, 'utf8').split('\n').entries()) {
       if (!line.trim()) continue;
       try { result.push(JSON.parse(line)); }
       catch { warn(`Skipped damaged JSON at ${file}:${index + 1}`); }
-    }
-    if (text && !text.endsWith('\n')) {
-      const fd = openSync(file, 'a');
-      try { writeSync(fd, '\n'); fsyncSync(fd); } finally { closeSync(fd); }
     }
   }
   return result;
