@@ -7,7 +7,9 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import ts from 'typescript';
 import { Memory, localDay, type Compressor } from '../src/memory.ts';
+import { record } from '../src/cache.ts';
 import { adapters, readConversation, timestamp, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
 import { prepareImport, runImport, memoryDirectory, pendingImport, discardImport, deduplicate, chronological } from '../src/import/job.ts';
 import { chooseImport, showProgress } from '../src/import/ui.ts';
@@ -548,5 +550,42 @@ test('a Claude memory with a folded or literal YAML description imports the text
     assert.deepEqual(texts.get('literal')?.slice(1, 3), ['first line second line', '']);
     assert.deepEqual(texts.get('plain')?.slice(1, 3), ['one line', '']);
     for (const lines of texts.values()) assert.match(lines[0], /· type user · /, 'a key after the block still parses');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+const repo = new URL('..', import.meta.url).pathname;
+
+test('a source added to Origin without an adapter fails tsc', () => {
+  const memory = join(repo, 'src/memory.ts'), sources = join(repo, 'src/import/sources.ts');
+  const config = ts.getParsedCommandLineOfConfigFile(join(repo, 'tsconfig.json'), {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: diagnostic => { throw new Error(ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')); } });
+  assert.ok(config);
+  const errors = (memoryText: string) => {
+    const host = ts.createCompilerHost(config.options), getSourceFile = host.getSourceFile.bind(host);
+    host.getSourceFile = (name, languageVersion, ...rest) => name === memory ? ts.createSourceFile(name, memoryText, languageVersion) : getSourceFile(name, languageVersion, ...rest);
+    const program = ts.createProgram([sources], config.options, host);
+    return ts.getPreEmitDiagnostics(program, program.getSourceFile(sources)).map(d => ts.flattenDiagnosticMessageText(d.messageText, '\n'));
+  };
+  const original = readFileSync(memory, 'utf8'), withFifth = original.replace("| 'chatgpt';", "| 'chatgpt' | 'slack';");
+  assert.notEqual(withFifth, original);
+  assert.deepEqual(errors(original), []);
+  const failures = errors(withFifth);
+  assert.match(failures[0], /does not satisfy the expected type 'Record<[^>]*"slack"[^>]*, Adapter>'[\s\S]*Property 'slack' is missing/);
+});
+
+test('lint rejects a comparison of an import source with a name outside the adapter table, and only under src/import', () => {
+  const root = temp();
+  for (const dir of ['src/import', 'test']) mkdirSync(join(root, dir), { recursive: true });
+  writeFileSync(join(root, 'src/import/branch.ts'), [
+    "export const a = (c: { source: string }) => c.source === 'claude';",
+    "export const b = (c: { source: string }) => 'codex' !== c.source;",
+    "export const d = (c: { source: string }) => { switch (c.source) { case 'chatgpt': return 1; default: return 0; } };",
+    "export const kept = (c: { source: string; id: string }, other: string) => c.source === other || c.id === 'claude' || other === 'claude';",
+  ].join('\n') + '\n');
+  writeFileSync(join(root, 'src/agents.ts'), "export const tell = (event: { source: string }) => event.source === 'extension';\n");
+  try {
+    const run = (() => { try { return execFileSync(process.execPath, ['--import', 'tsx', join(repo, 'scripts/lint.ts'), root], { cwd: repo, encoding: 'utf8' }); } catch (error) { return record(error) ? String(error.stdout) : ''; } })();
+    const message = 'Per-source behavior lives in the adapter table in src/import/sources.ts.';
+    assert.deepEqual(run.split('\n').filter(line => line.startsWith('src/')),
+      [1, 2, 3].map(line => `src/import/branch.ts:${line} source-branch ${message}`));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

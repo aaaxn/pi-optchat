@@ -30,6 +30,13 @@ const rules: Rule[] = [
   { name: 'run-state-owner', exempt: /^src\/runs\.ts$/, message: 'Run state changes only through transition() in src/runs.ts.',
     hit: node => ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
       && ts.isPropertyAccessExpression(node.left) && node.left.name.text === 'state' },
+  { name: 'source-branch', exempt: /^(?!src\/import\/)/, message: 'Per-source behavior lives in the adapter table in src/import/sources.ts.',
+    hit: node => {
+      const isSource = (n: ts.Node) => ts.isPropertyAccessExpression(n) && n.name.text === 'source';
+      const equality = [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken];
+      return ts.isBinaryExpression(node) && equality.includes(node.operatorToken.kind) && [node.left, node.right].some(isSource) && [node.left, node.right].some(ts.isStringLiteralLike)
+        || ts.isCaseClause(node) && ts.isStringLiteralLike(node.expression) && isSource(node.parent.parent.expression);
+    } },
 ];
 
 const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
