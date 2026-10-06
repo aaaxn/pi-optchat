@@ -74,8 +74,6 @@ Accepted deviations from the recipe:
 - When the Anthropic view is not cached yet, one compactor call goes first and the parallel calls wait until it starts answering, so they read the cache instead of each writing it (from upstream 0.6.7).
 - Not done: computer use and hosting on an always-on machine.
 
-The README section "How it differs from the recipe" describes these for users. Keep it in sync with this list.
-
 ## Keep the fork's design
 
 Upstream deviates from the recipe in several places. This fork keeps the recipe's behavior. When you merge upstream or port its code, never bring back the upstream side of these rows:
