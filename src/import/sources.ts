@@ -48,6 +48,7 @@ export function timestamp(value: unknown, fallback: string): string {
 }
 /** Header time: minutes are enough to place a message, and the rest of an ISO stamp costs summary bytes. */
 const minute = (date: string) => `${date.slice(0, 16).replace('T', ' ')}Z`;
+const titleOf = (title: string | undefined, id: string) => (title ?? '').replace(/\s+/g, ' ').trim().slice(0, 110) || id;
 const byRecent = (conversations: Conversation[]) => conversations.sort((a, b) => b.date.localeCompare(a.date));
 /**
  * Claude Code logs slash commands, `!` shell commands, and their local output as user messages. Returns undefined
@@ -81,7 +82,7 @@ function imported(c: Conversation, id: string, kind: Kind, content: string, date
   const origin: Origin = { source: c.source, conversation: c.id, message: id, title: c.title, project: c.project };
   // The agent reads only text, so the id's first 13 characters stay in it: enough to find a Claude or Codex transcript by
   // glob. Codex ids are UUIDv7, whose first 8 characters are a coarse timestamp shared by many sessions.
-  return { kind, date, origin, text: `[Historical ${c.source} · ${minute(date)} · ${c.id.slice(0, 13)} · ${c.title}]\n${content}`,
+  return { kind, date, origin, text: `[Historical ${c.source} · ${minute(date)} · ${c.id.slice(0, 13)} · ${titleOf(c.title, c.id)}]\n${content}`,
     receipt: `import:${digest(JSON.stringify([c.source, c.id, id, kind, identity]))}` };
 }
 async function* jsonLines(file: string, warnings: string[], limit = Infinity, signal?: AbortSignal) {
@@ -298,7 +299,7 @@ const chatgpt: Adapter = {
           warnings.push(`${doc.file}: unrecognized conversation skipped`); continue;
         }
         const id = String(value.id ?? value.conversation_id);
-        conversations.push({ source: 'chatgpt', id, file: doc.file, title: string(value.title) ?? id,
+        conversations.push({ source: 'chatgpt', id, file: doc.file, title: titleOf(string(value.title), id),
           project: 'ChatGPT', date: timestamp(value.create_time, info.mtime.toISOString()), size: bytes(JSON.stringify(value)), exported: value });
       }
     }

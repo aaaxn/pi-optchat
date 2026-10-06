@@ -435,3 +435,24 @@ test('a time without a zone is UTC whatever the machine zone, and an out-of-rang
     for (const bad of [1e13, -1e13, NaN, Infinity, 'not a time', undefined, null]) assert.equal(timestamp(bad, 'fallback'), 'fallback');
   } finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }
 });
+
+test('a ChatGPT conversation with an empty or multi-line title gets a one-line header that falls back to its id', async () => {
+  const dir = temp(), file = join(dir, 'conversations.json');
+  const chat = (id: string, title: unknown) => ({ id, title, create_time: 1767355200, mapping: {
+    u: { parent: null, message: { id: 'm', author: { role: 'user' }, create_time: 1767355200, content: { parts: ['hi'] } } } } });
+  writeFileSync(file, JSON.stringify([chat('abc-def-ghi-jkl-mno', ''), chat('blank-title-0000-0000', '  \n '), chat('long-title-1111-1111', 'First line\nsecond   line ' + 'x'.repeat(200)), chat('missing-title-2222', undefined)]));
+  try {
+    const scan = await adapters.chatgpt.scan(dir);
+    const headers = new Map<string, string>();
+    for (const c of scan.conversations) headers.set(c.id, (await readConversation(c)).entries[0].text.split('\n')[0]);
+    assert.equal(headers.get('abc-def-ghi-jkl-mno'), '[Historical chatgpt · 2026-01-02 12:00Z · abc-def-ghi-j · abc-def-ghi-jkl-mno]');
+    assert.equal(headers.get('blank-title-0000-0000'), '[Historical chatgpt · 2026-01-02 12:00Z · blank-title-0 · blank-title-0000-0000]');
+    assert.equal(headers.get('missing-title-2222'), '[Historical chatgpt · 2026-01-02 12:00Z · missing-title · missing-title-2222]');
+    const long = headers.get('long-title-1111-1111') ?? '';
+    assert.match(long, /^\[Historical chatgpt · 2026-01-02 12:00Z · long-title-11 · First line second line x+\]$/);
+    assert.ok(long.length < 200);
+    assert.ok(scan.conversations.every(c => c.title && !/\n/.test(c.title)));
+    const origin = (await readConversation(scan.conversations.find(c => c.id === 'abc-def-ghi-jkl-mno')!)).entries[0].origin;
+    assert.equal(origin?.title, 'abc-def-ghi-jkl-mno');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
