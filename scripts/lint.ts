@@ -68,6 +68,7 @@ for (const file of ['src', 'test'].flatMap(dir => walk(join(root, dir)))) {
 
 let failed = false;
 const fail = (line: string) => { failed = true; console.log(line); };
+if (!importSources.length) fail('scripts/lint.ts: cannot read the import source names from Origin in src/memory.ts, so the source-branch rule would check nothing.');
 const pairs = new Set([...hits.map(hit => `${hit.file}\t${hit.rule.name}`), ...exceptions.map(entry => `${entry.file}\t${entry.rule}`)]);
 for (const pair of pairs) {
   const [file, name] = pair.split('\t');

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import ts from 'typescript';
 import { Memory, localDay, type Compressor } from '../src/memory.ts';
@@ -622,6 +622,22 @@ test('lint rejects a comparison of an import source with its name anywhere in sr
       ...[1, 2, 3].map(line => `src/import/branch.ts:${line} source-branch ${message}`),
       `src/outside.ts:1 source-branch ${message}`,
     ]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('lint fails loudly when it cannot read the import source names from Origin, instead of letting source-branch check nothing', () => {
+  const root = temp();
+  for (const dir of ['scripts', 'src', 'test']) mkdirSync(join(root, dir));
+  copyFileSync(join(repo, 'scripts/lint.ts'), join(root, 'scripts/lint.ts'));
+  fs.symlinkSync(join(repo, 'node_modules'), join(root, 'node_modules'));
+  const lint = () => spawnSync(process.execPath, ['--import', 'tsx', join(root, 'scripts/lint.ts'), root], { cwd: repo, encoding: 'utf8' });
+  try {
+    writeFileSync(join(root, 'src/memory.ts'), readFileSync(join(repo, 'src/memory.ts'), 'utf8'));
+    assert.doesNotMatch(lint().stdout, /cannot read the import source names/, 'the real Origin line is read');
+    writeFileSync(join(root, 'src/memory.ts'), "export type Origin = { source: 'claude' | 'codex' };\n");
+    const run = lint();
+    assert.equal(run.status, 1);
+    assert.match(run.stdout, /^scripts\/lint\.ts: cannot read the import source names from Origin in src\/memory\.ts, so the source-branch rule would check nothing\.\n/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
