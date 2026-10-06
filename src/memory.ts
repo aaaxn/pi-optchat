@@ -20,7 +20,6 @@ export const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
 const UNBUILT_BYTES = bytes(UNBUILT);
 export const flat = (s: string) => s.replace(/[\r\n]+/g, ' ');
 const VIEW_OPEN = '<chat>\n';
-/** The view is the one text block that starts with its opening line; no other block is the view, whatever it quotes. */
 export const isView = (text: string) => text.startsWith(VIEW_OPEN);
 export function cap(text: string, limit = CAP) {
   if (text.length <= limit) return text;

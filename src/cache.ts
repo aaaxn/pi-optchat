@@ -34,7 +34,6 @@ export function cachePayload(payload: unknown): unknown {
   }
   if (!view.size) return payload;
   // Pi's default system/recent-message marks would exceed Anthropic's four-mark limit.
-  // Remove every adapter mark, keeping only the newly split view's three marks.
   for (const section of [payload.system, payload.tools]) {
     if (Array.isArray(section)) for (const item of section) if (record(item)) delete item.cache_control;
   }
