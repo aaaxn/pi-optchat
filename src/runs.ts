@@ -15,6 +15,18 @@ export interface RunInfo {
   /** `from` is missing on runs saved before senders were recorded. */
   guidance: { text: string; date: number; state: 'queued' | 'delivered' | 'undelivered'; from?: 'user' | 'manager' }[];
 }
+type Guidance = RunInfo['guidance'][number];
+export const deliverGuidance = (guidance: Guidance) => { guidance.state = 'delivered'; };
+export const undeliverGuidance = (guidance: Guidance) => { guidance.state = 'undelivered'; };
+const moves: Record<RunState, readonly RunState[]> = {
+  running: ['stopping', 'completed', 'failed', 'stopped'], stopping: ['stopped', 'failed', 'completed'],
+  completed: [], failed: [], stopped: [], interrupted: [],
+};
+/** The one way a live run changes state. A finished run never moves again, so a late stop cannot rewrite its result. */
+export function transition(run: RunInfo, to: RunState) {
+  if (!moves[run.state].includes(to)) return false;
+  run.state = to; return true;
+}
 export const isActiveRun = (run: RunInfo) => run.state === 'running' || run.state === 'stopping';
 function isRun(value: unknown): value is RunInfo {
   return record(value) && ['id', 'task', 'cwd', 'model', 'thinking', 'parentSession'].every(k => typeof value[k] === 'string')
@@ -47,7 +59,7 @@ export class RunHistory {
         if (isActiveRun(run)) {
           run.state = 'interrupted'; run.ended = Date.now();
           run.report = 'Pi closed before this agent finished. Its partial transcript is retained.';
-          for (const g of run.guidance) if (g.state === 'queued') g.state = 'undelivered';
+          for (const g of run.guidance) if (g.state === 'queued') undeliverGuidance(g);
           this.save(run);
         }
       } catch { this.warnings.push(`Could not read run metadata: ${file}`); }

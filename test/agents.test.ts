@@ -272,6 +272,72 @@ test('a batch that fails mid-launch rolls back every launched child even when th
   } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a stop that arrives while a finished child shuts down leaves it completed', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-late-stop-'));
+  const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
+  const runtime = await fakeRuntime(dir, fakeProvider('done'));
+  let finish!: () => void;
+  const finishing = new Promise<void>(resolve => { finish = resolve; });
+  const children = makeChildren({ memory, runtime, dir, createSession: async options => {
+    const created = await createAgentSession({ ...options, modelRuntime: runtime });
+    const runner = created.session.extensionRunner, emit = runner.emit.bind(runner);
+    runner.emit = (async (event: Parameters<typeof emit>[0]) => {
+      if (event.type === 'session_shutdown') await finishing;
+      return emit(event);
+    }) as typeof emit;
+    return created;
+  } });
+  try {
+    const [id] = await children.spawn([{ task: 'quick' }], dir);
+    await until(() => children.history.records.get(id)?.state === 'completed' && !!children.live(id));
+    await children.stop(id);
+    finish();
+    await until(() => !children.active);
+    assert.equal(children.history.records.get(id)?.state, 'completed', 'a finished run never moves to stopping again');
+  } finally { finish(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('close() waits for a spawn that is still opening its sessions', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-close-opening-'));
+  const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
+  const runtime = await fakeRuntime(dir, fakeProvider('done'));
+  let release!: () => void, began!: () => void, disposed = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { began = resolve; });
+  const children = makeChildren({ memory, runtime, dir, createSession: async options => {
+    began(); await gate;
+    const created = await createAgentSession({ ...options, modelRuntime: runtime });
+    const dispose = created.session.dispose.bind(created.session);
+    created.session.dispose = () => { disposed++; dispose(); };
+    return created;
+  } });
+  try {
+    const spawn = children.spawn([{ task: 'quick' }], dir);
+    const refused = assert.rejects(spawn, /Profile is closing/);
+    await started;
+    const closing = children.close();
+    release();
+    await closing;
+    assert.equal(disposed, 1, 'close() returned while a session was still being created');
+    await refused;
+  } finally { release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('close() does not wait for a spawn that is still waiting for memory to be summarized', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-close-settling-'));
+  const memory = new Memory(dir, async () => { throw new Error('compactor outage'); }, () => {});
+  const children = makeChildren({ memory, runtime: await fakeRuntime(dir, fakeProvider('done')), dir });
+  try {
+    memory.append('user', 'large message '.repeat(100));
+    const spawn = children.spawn([{ task: 'quick' }], dir);
+    const refused = assert.rejects(spawn, /Memory wait cancelled/);
+    await until(() => children.active);
+    const closed = await Promise.race([children.close().then(() => true), new Promise<boolean>(resolve => setTimeout(resolve, 2000, false))]);
+    assert.ok(closed, 'close() is still waiting for the spawn');
+    await memory.close();
+    await refused;
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 async function quickChildren(dir: string) {
   const runtime = await fakeRuntime(dir, fakeProvider('done'));
   return makeChildren({ memory: new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {}), runtime, dir: join(dir, 'profile') });
