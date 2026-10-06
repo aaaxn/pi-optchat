@@ -97,7 +97,6 @@ export async function scanLocal(source: 'claude' | 'codex', roots?: string[], si
           id = string(v.payload.id) ?? id; project = string(v.payload.cwd) ?? project; date = timestamp(v.payload.timestamp ?? v.timestamp, date);
         }
         if (source === 'claude') {
-          id = string(v.sessionId) ?? id;
           project = string(v.cwd) ?? project;
           if (v.type === 'custom-title' || v.type === 'ai-title') title = string(v.customTitle ?? v.aiTitle) ?? title;
         }
@@ -237,7 +236,9 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
   signal?.throwIfAborted();
   if (c.source === 'claude-memory') return readMemory(c, signal);
   const entries: ImportedEntry[] = [], warnings: string[] = [];
-  const add = (id: string, kind: Kind, value: string, date: string, identity = value) => { const entry = imported(c, id, kind, value, date, identity); if (entry) entries.push(entry); };
+  // A resumed Claude transcript copies earlier sessions' messages. Each keeps the session it was written in, so the original and the resumed file give it one receipt.
+  let current = c;
+  const add = (id: string, kind: Kind, value: string, date: string, identity = value) => { const entry = imported(current, id, kind, value, date, identity); if (entry) entries.push(entry); };
   if (c.source === 'chatgpt') {
     const mapping = c.exported?.mapping;
     if (!record(mapping)) throw new Error('ChatGPT conversation has no message mapping.');
@@ -304,7 +305,7 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
     const finish = () => { entries.push(...pending); pending = []; };
     const assistant = (parts: { id: string; content: string }[], date: string, final: boolean) => {
       pending = parts.flatMap(part => {
-        const entry = imported(c, part.id, 'talk', part.content, date);
+        const entry = imported(current, part.id, 'talk', part.content, date);
         return entry ? [entry] : [];
       });
       if (final) finish();
@@ -312,6 +313,9 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
     try {
       for await (const { value: v, line } of jsonLines(c.file, warnings, Infinity, signal)) {
         const date = timestamp(v.timestamp, c.date);
+        // A record that names no session belongs to the last one named. An empty name is no name.
+        const session = c.source === 'claude' ? string(v.sessionId) : undefined;
+        if (session) current = { ...c, id: session };
         // Context replay and compaction scaffolding are not new user requests.
         if (c.source === 'claude' && v.type === 'system' && v.subtype === 'compact_boundary') { pending = []; continue; }
         if (c.source === 'claude' && (v.isMeta === true || v.isCompactSummary === true)) continue;

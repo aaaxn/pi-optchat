@@ -152,7 +152,7 @@ Pick the destination profile, then run `/optchat import`.
 
 **Claude Code memories**: the auto-memory topic files in `~/.claude/projects/*/memory/` (not `MEMORY.md`, which only indexes them), picked by project. Each file becomes one dated note in the memory tree, not part of the prompt. An edited file comes in again as a newer note.
 
-**Duplicates**: re-importing skips messages already present, even if titles or paths changed. Changed source messages can appear as a separate historical version.
+**Duplicates**: re-importing skips messages already present, even if titles or paths changed. A resumed Claude Code transcript copies the earlier messages into a new file. They keep the session they came from, so they count once. Changed source messages can appear as a separate historical version.
 
 **Pausing**: **Pause import** (or Escape) saves progress, and so does restarting Pi. `/optchat import` then offers **Resume** or **Discard staged import**. While an import is pending, chat in that profile is blocked; other profiles still work. Imports need the main agent and its subagents to be idle.
 

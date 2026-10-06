@@ -184,7 +184,7 @@ test('Claude discovery keeps the parent conversation and skips modern, legacy, a
   lines(join(workflow, 'conversation.jsonl'), [user]);
   try {
     const scan = await scanLocal('claude', [dir]);
-    assert.deepEqual(scan.conversations.map(c => c.id), ['shared']);
+    assert.deepEqual(scan.conversations.map(c => c.id), ['session']);
     assert.deepEqual(scan.conversations.map(c => c.file), [parent]);
     assert.ok(scan.conversations.every(c => c.project === '/project' && c.date === date));
     const parsed = await readConversation(scan.conversations[0]);
@@ -193,6 +193,40 @@ test('Claude discovery keeps the parent conversation and skips modern, legacy, a
     assert.deepEqual(scan.warnings, []);
     await assert.rejects(scanLocal('claude', [dir], AbortSignal.abort()));
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a resumed Claude transcript is listed under its file name, and its copied messages keep the session they came from so they import once', async () => {
+  const dir = temp();
+  const user = (uuid: string, session: string, content: string) => ({ type: 'user', uuid, sessionId: session, cwd: '/project', timestamp: date, message: { role: 'user', content } });
+  const reply = (uuid: string, session: string, content: string) => ({ type: 'assistant', uuid, sessionId: session, timestamp: date, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: content }] } });
+  const copied = [user('u1', 'aaaaaaaa-0000', 'q1'), reply('a1', 'aaaaaaaa-0000', 'r1'), user('u2', 'aaaaaaaa-0000', 'q2'), reply('a2', 'aaaaaaaa-0000', 'r2')];
+  lines(join(dir, 'aaaaaaaa-0000.jsonl'), copied);
+  lines(join(dir, 'bbbbbbbb-1111.jsonl'), [...copied, user('u3', 'bbbbbbbb-1111', 'q3'), reply('a3', 'bbbbbbbb-1111', 'r3')]);
+  try {
+    const scan = await scanLocal('claude', [dir]);
+    assert.deepEqual(scan.conversations.map(c => c.id).sort(), ['aaaaaaaa-0000', 'bbbbbbbb-1111']);
+    const [old, resumed] = await Promise.all(scan.conversations.sort((x, y) => x.id.localeCompare(y.id)).map(c => readConversation(c)));
+    assert.deepEqual(resumed.entries.map(e => e.origin?.conversation), [...Array(4).fill('aaaaaaaa-0000'), 'bbbbbbbb-1111', 'bbbbbbbb-1111']);
+    const merged = deduplicate([], [...old.entries, ...resumed.entries]);
+    assert.deepEqual(merged.added.map(e => e.text.split('\n')[1]), ['q1', 'r1', 'q2', 'r2', 'q3', 'r3']);
+    assert.equal(merged.skipped, 4);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a Claude record without a sessionId takes the last one seen in the file, and a leading one takes the file name', async () => {
+  const dir = temp();
+  const user = (uuid: string, content: string, session?: string) => ({ type: 'user', uuid, ...(session === undefined ? {} : { sessionId: session }), timestamp: date, message: { role: 'user', content } });
+  const reply = (uuid: string, content: string, session?: string) => ({ type: 'assistant', uuid, ...(session === undefined ? {} : { sessionId: session }), timestamp: date, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: content }] } });
+  lines(join(dir, 'partial-4444.jsonl'), [user('u1', 'q1', 'sess-x'), reply('a1', 'r1'), user('u2', 'q2', ''), reply('a2', 'r2')]);
+  lines(join(dir, 'whole-5555.jsonl'), [user('u1', 'q1', 'sess-x'), reply('a1', 'r1', 'sess-x'), user('u2', 'q2', 'sess-x'), reply('a2', 'r2', 'sess-x')]);
+  lines(join(dir, 'lead-6666.jsonl'), [user('u0', 'q0'), reply('a0', 'r0'), user('u1', 'q1', 'sess-y'), reply('a1', 'r1')]);
+  try {
+    const scan = await scanLocal('claude', [dir]);
+    const [partial, whole, lead] = await Promise.all(['partial-4444', 'whole-5555', 'lead-6666'].map(id => readConversation(scan.conversations.find(c => c.id === id)!)));
+    assert.deepEqual(partial.entries.map(e => e.origin?.conversation), Array(4).fill('sess-x'));
+    assert.deepEqual(partial.entries.map(e => e.receipt), whole.entries.map(e => e.receipt), 'the receipts are the ones a file that names the session on every record gives');
+    assert.deepEqual(lead.entries.map(e => e.origin?.conversation), ['lead-6666', 'lead-6666', 'sess-y', 'sess-y']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('Claude discovery checks late sidechain markers without extending metadata extraction or Codex scanning', async () => {
