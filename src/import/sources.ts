@@ -45,7 +45,8 @@ export function timestamp(value: unknown, fallback: string): string {
 }
 /** Header time: minutes are enough to place a message, and the rest of an ISO stamp costs summary bytes. */
 const minute = (date: string) => `${date.slice(0, 16).replace('T', ' ')}Z`;
-const titleOf = (title: string | undefined, id: string) => (title ?? '').replace(/\s+/g, ' ').trim().slice(0, 110).trim() || id;
+const squash = (s: string) => s.replace(/\s+/g, ' ').trim();
+const titleOf = (title: string | undefined, id: string) => squash(title ?? '').slice(0, 110).trim() || id;
 const byRecent = (conversations: Conversation[]) => conversations.sort((a, b) => b.date.localeCompare(a.date));
 /**
  * Claude Code logs slash commands, `!` shell commands, and their local output as user messages. Returns undefined
@@ -424,15 +425,14 @@ const claudeMemory: Adapter = {
     }
     const { fields, body } = frontmatter(content);
     if (!body.trim()) return { entries: [], warnings: [] };
-    const one = (s: string) => s.replace(/\s+/g, ' ').trim();
-    const name = one(fields.get('name') ?? c.title), type = fields.get('type'), description = fields.get('description');
+    const name = squash(fields.get('name') ?? c.title), type = fields.get('type'), description = fields.get('description');
     // The whole file is the identity, so an edited memory arrives as a newer note and an unchanged one is skipped.
     const hash = digest(content);
     // Date the note from this read, not the earlier scan, in case Claude edited the file meanwhile.
     const date = timestamp(fields.get('modified'), modified.toISOString());
     return { warnings: [], entries: [{ kind: 'note', date,
       origin: { source: c.source, conversation: c.id, message: hash.slice(0, 16), title: name, project: c.project },
-      text: `[Historical Claude Code memory · ${minute(date)} · project ${c.project}${type ? ` · type ${one(type)}` : ''} · ${name}]\n${description ? one(description) + '\n\n' : ''}${body.trim()}`,
+      text: `[Historical Claude Code memory · ${minute(date)} · project ${c.project}${type ? ` · type ${squash(type)}` : ''} · ${name}]\n${description ? squash(description) + '\n\n' : ''}${body.trim()}`,
       receipt: `import:${digest(JSON.stringify([c.source, c.id, hash]))}` }] };
   },
 };
