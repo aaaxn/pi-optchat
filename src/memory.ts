@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
@@ -30,12 +30,15 @@ export function cap(text: string, limit = CAP) {
 export function localDay(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
-export function appendJson(file: string, value: unknown) {
+/** With `size`, refuses to append unless the file still has the size this process last saw, so a second writer is caught before it corrupts the log. Returns the new size. */
+export function appendJson(file: string, value: unknown, size?: number) {
   const fd = openSync(file, 'a', 0o600);
   try {
+    if (size !== undefined && fstatSync(fd).size !== size) throw new Error(`Another process wrote ${file}. Close every other Pi on this profile and restart Pi; nothing was written.`);
     const data = Buffer.from(JSON.stringify(value) + '\n');
     if (writeSync(fd, data) !== data.length) throw new Error(`Incomplete write: ${file}`);
     fsyncSync(fd);
+    return fstatSync(fd).size;
   } finally { closeSync(fd); }
 }
 function records(dir: string, warn: (s: string) => void): unknown[] {
@@ -79,6 +82,8 @@ export class Memory {
   private readonly busy = new Map<number, Promise<void>>();
   private readonly retryAt = new Map<number, number>();
   private readonly reported = new Set<number>();
+  /** Bytes of each main log file as this process last saw them. */
+  private readonly sizes = new Map<string, number>();
   private viewBytes = 0;
   private leaves = 0;
   /** Per level, every node below this index is built. */
@@ -92,7 +97,9 @@ export class Memory {
     private readonly warn: (s: string) => void = console.error,
     readonly budget = VIEW, private readonly jobs = 8, private readonly retryMs = 10_000) {
     for (const sub of ['main', 'tree']) mkdirSync(join(directory, sub), { recursive: true, mode: 0o700 });
-    for (const value of records(join(directory, 'main'), warn)) {
+    const main = join(directory, 'main'), log = records(main, warn);
+    for (const name of readdirSync(main).filter(n => n.endsWith('.jsonl'))) this.sizes.set(join(main, name), statSync(join(main, name)).size);
+    for (const value of log) {
       if (!isEntry(value) || value.i !== this.root.length) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
       this.root.push({ ...value, size: bytes(`${value.kind}: ${value.text}`) });
     }
@@ -109,7 +116,8 @@ export class Memory {
   append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string) {
     if (this.stopped) throw new Error('Memory is closed.');
     const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}) };
-    appendJson(join(this.directory, 'main', `${localDay()}.jsonl`), entry);
+    const file = join(this.directory, 'main', `${localDay()}.jsonl`);
+    this.sizes.set(file, appendJson(file, entry, this.sizes.get(file) ?? 0));
     this.root.push(entry); this.push(entry.i); this.fit(); this.schedule();
     return entry;
   }

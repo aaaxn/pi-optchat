@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
+import { Memory } from '../src/memory.ts';
 import { createProfile, loadConfig, lockProfile, profilePath, profileSocket, saveConfig } from '../src/profiles.ts';
 import { fakeProvider, fakeRuntime } from './fakes.ts';
 
@@ -117,4 +118,29 @@ test('a socket path of 103 bytes locks, and a longer one names TMPDIR in the err
     if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('a second writer that got past the lock is refused on its next turn, with the log intact', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-writer-')), oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = join(dir, 'home');
+  let session: Awaited<ReturnType<typeof start>>['session'] | undefined;
+  try {
+    createProfile('shared');
+    saveConfig(profilePath('shared'), { compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' }, subagent: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    const opened = await start(dir, { select: async () => 'shared' });
+    session = opened.session;
+    const other = new Memory(profilePath('shared'), async () => 'summary', () => {});
+    other.append('user', 'written by the other process'); await other.close();
+
+    await session.prompt('Question for the first process');
+    await session.agent.waitForIdle();
+    assert.match(opened.errors.join('\n'), /Another process wrote .*nothing was written/);
+    assert.ok(!opened.session.messages.some(m => m.role === 'assistant' && JSON.stringify(m.content).includes('Done.')), 'no model call after the refusal');
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+  }
+  const reopened = new Memory(join(dir, 'home', 'profiles', 'shared'), async () => 'summary', () => {});
+  try { assert.deepEqual(reopened.root.map(e => e.text), ['written by the other process']); }
+  finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
 });
