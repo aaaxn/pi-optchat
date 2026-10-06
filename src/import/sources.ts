@@ -454,10 +454,19 @@ async function claudeProject(folder: string, name: string, signal?: AbortSignal)
 function frontmatter(content: string) {
   const match = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(content);
   const fields = new Map<string, string>();
-  for (const line of match ? match[1].split(/\r?\n/) : []) {
+  const lines = match ? match[1].split(/\r?\n/) : [];
+  for (let i = 0; i < lines.length; i++) {
     // Newer files nest type/modified under `metadata:`; the first occurrence of each key wins.
-    const m = /^\s*([A-Za-z]+):\s*(.+?)\s*$/.exec(line);
-    if (m && !fields.has(m[1])) fields.set(m[1], unquote(m[2]));
+    const m = /^(\s*)([A-Za-z]+):\s*(.+?)\s*$/.exec(lines[i]);
+    if (!m) continue;
+    let value: string;
+    if (/^[>|][+-]?\d?$/.test(m[3])) {
+      let end = i + 1;
+      while (end < lines.length && (!lines[end].trim() || lines[end].search(/\S/) > m[1].length)) end++;
+      value = lines.slice(i + 1, end).map(line => line.trim()).join(m[3].startsWith('>') ? ' ' : '\n').trim();
+      i = end - 1;
+    } else value = unquote(m[3]);
+    if (value && !fields.has(m[2])) fields.set(m[2], value);
   }
   return { fields, body: match ? content.slice(match[0].length) : content };
 }

@@ -533,3 +533,20 @@ test('a ChatGPT conversation with a very long chain of replies imports in order,
   const loop = { a: { parent: 'b', message: { author: { role: 'user' }, content: { parts: ['a'] } } }, b: { parent: 'a', message: { author: { role: 'user' }, content: { parts: ['b'] } } } };
   await assert.rejects(readConversation(chat({ mapping: loop })), /cycle in ChatGPT conversation mapping/);
 });
+
+test('a Claude memory with a folded or literal YAML description imports the text, not the indicator', async () => {
+  const root = temp(), memory = join(root, '-tmp-alpha', 'memory'); mkdirSync(memory, { recursive: true });
+  const note = (name: string, description: string) => writeFileSync(join(memory, `${name}.md`), `---\nname: ${name}\n${description}\ntype: user\n---\nbody of ${name}\n`);
+  note('folded', 'description: >\n  a long\n  description: with a colon\n\n  second paragraph');
+  note('literal', 'description: |-\n  first line\n  second line');
+  note('plain', 'description: one line');
+  try {
+    const scan = await adapters['claude-memory'].scan(root);
+    const texts = new Map<string, string[]>();
+    for (const c of scan.conversations) texts.set(c.title, (await readConversation(c)).entries[0].text.split('\n'));
+    assert.deepEqual(texts.get('folded')?.slice(1, 3), ['a long description: with a colon second paragraph', '']);
+    assert.deepEqual(texts.get('literal')?.slice(1, 3), ['first line second line', '']);
+    assert.deepEqual(texts.get('plain')?.slice(1, 3), ['one line', '']);
+    for (const lines of texts.values()) assert.match(lines[0], /· type user · /, 'a key after the block still parses');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
