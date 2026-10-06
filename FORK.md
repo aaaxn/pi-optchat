@@ -24,6 +24,7 @@ Fixes that suit both designs go upstream. Upstream already took these from the f
 | | This fork | Upstream |
 |---|---|---|
 | Same profile in a second terminal | Refused. A new session can go **Back** and pick another profile | Can connect as a subagent conversation in that terminal's directory, with `/tell-main`, `/complete`, and a handoff summary |
+| Tab title | Set by the main window only | Set by each window, with its status |
 
 ## Cache and compactor
 
