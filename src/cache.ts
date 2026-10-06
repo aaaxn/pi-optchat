@@ -1,3 +1,5 @@
+import { isView } from './memory.ts';
+
 export function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -19,38 +21,27 @@ export function splitView(text: string) {
 export function cachePayload(payload: unknown): unknown {
   if (!record(payload) || !Array.isArray(payload.messages)) return payload;
   const messages = payload.messages;
-  let found = false;
+  const view = new Set<unknown>();
   for (const message of messages) {
     if (!record(message) || message.role !== 'user' || !Array.isArray(message.content)) continue;
-    for (let i = 0; i < message.content.length; i++) {
-      const block: unknown = message.content[i];
-      if (!record(block) || block.type !== 'text' || typeof block.text !== 'string' || !block.text.startsWith('<chat>\n')) continue;
-      found = true;
-      const pieces = splitView(block.text);
-      message.content.splice(i, 1, ...pieces.map((text, j) => ({ type: 'text', text,
-        ...(j < pieces.length - 1 ? { cache_control: { type: 'ephemeral' } } : {}) })));
-      break;
-    }
-    if (found) break;
+    const at = message.content.findIndex((block: unknown) => record(block) && block.type === 'text' && typeof block.text === 'string' && isView(block.text));
+    if (at < 0) continue;
+    const pieces = splitView(message.content[at].text);
+    const blocks = pieces.map((text, j) => ({ type: 'text', text, ...(j < pieces.length - 1 ? { cache_control: { type: 'ephemeral' } } : {}) }));
+    message.content.splice(at, 1, ...blocks);
+    for (const block of blocks) view.add(block);
+    break;
   }
-  if (!found) return payload;
+  if (!view.size) return payload;
   // Pi's default system/recent-message marks would exceed Anthropic's four-mark limit.
-  // Remove all adapter marks first, keeping only the newly split view's three marks.
+  // Remove every adapter mark, keeping only the newly split view's three marks.
   for (const section of [payload.system, payload.tools]) {
     if (Array.isArray(section)) for (const item of section) if (record(item)) delete item.cache_control;
   }
-  let seenView = false;
   for (const message of messages) {
     if (!record(message)) continue;
     delete message.cache_control;
-    if (!Array.isArray(message.content)) continue;
-    let inView = false;
-    for (const item of message.content) {
-      if (!record(item)) continue;
-      if (!seenView && item.type === 'text' && typeof item.text === 'string' && item.text.startsWith('<chat>\n')) { inView = true; seenView = true; }
-      if (!inView) delete item.cache_control;
-      if (inView && typeof item.text === 'string' && item.text.includes('</chat>')) { delete item.cache_control; inView = false; }
-    }
+    if (Array.isArray(message.content)) for (const item of message.content) if (record(item) && !view.has(item)) delete item.cache_control;
   }
   payload.cache_control = { type: 'ephemeral' };
   return payload;

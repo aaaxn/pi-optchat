@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, getAgentDir } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import optchat from '../src/index.ts';
+import { isView } from '../src/memory.ts';
 import { createProfile, profilePath } from '../src/profiles.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'optchat-live-'));
@@ -38,7 +39,7 @@ try {
   console.log('SECOND:', session.getLastAssistantText());
   assert.match(session.getLastAssistantText() ?? '', /copper heron 814/i);
   assert.ok(JSON.stringify(captured[boundary]).includes(first), 'previous request missing from the next turn');
-  assert.ok(JSON.stringify(captured[boundary]).includes('<chat>'));
+  assert.ok(captured[boundary].some(m => m.role === 'user' && Array.isArray(m.content) && m.content.some(block => block.type === 'text' && isView(block.text))));
   assert.ok(session.messages.some(m => m.role === 'toolResult' && m.toolName === 'zoom'));
   await session.prompt('Spawn one background agent. Its only task is to use zoom to read memory message 0, then reply with the fictional password phrase. Do no filesystem work or web browsing. Return immediately after spawn and wait for its automatic report.');
   console.log('SPAWN:', session.getLastAssistantText());
