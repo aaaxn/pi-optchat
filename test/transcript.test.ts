@@ -223,6 +223,61 @@ test('real Pi lifecycle retains one exchange across tool calls and resume, witho
   }
 });
 
+test('another extension\'s custom message starts a turn as a user message, and memory and the previous exchange keep it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-custom-'));
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  const captured: Context['messages'][] = [];
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    saveConfig(profilePath('fixture'), { ...loadConfig(profilePath('fixture')), compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
+      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+    runtime.registerProvider('fixture', {
+      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+      streamSimple(model, context) {
+        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+        if (!compression) captured.push(context.messages.filter(m => m.role !== 'system'));
+        const reply = answer(compression ? 'Summary.' : `Answer to: ${textContent(context.messages.at(-1)?.content).split('</chat>').at(-1)?.trim()}`);
+        reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end();
+        return stream;
+      },
+    });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.inMemory(dir);
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
+      resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom'] })).session;
+    await session.bindExtensions({});
+    await session.prompt('Start the scout.');
+    // As pi-interactive-subagents reports a finished subagent while Pi is idle.
+    const result = 'Sub-agent "Scout" finished: found three files.';
+    await session.sendCustomMessage({ customType: 'subagent_result', content: result, display: true }, { triggerTurn: true, deliverAs: 'steer' });
+    await session.agent.waitForIdle();
+    assert.equal(session.getLastAssistantText(), `Answer to: ${result}`);
+    assert.equal(textContent(captured.at(-1)!.at(-1)?.content), result);
+    await session.prompt('What did it find?');
+    assert.deepEqual(captured.at(-1)!.map(m => m.role), ['user', 'assistant', 'user']);
+    assert.ok(textContent(captured.at(-1)![0].content).endsWith(result));
+    assert.equal(textContent(captured.at(-1)![1].content), `Answer to: ${result}`);
+    const main = join(dir, 'profiles', 'fixture', 'main');
+    const log = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n').map(line => JSON.parse(line)));
+    assert.ok(log.some(entry => entry.kind === 'user' && entry.text === result));
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('main agent keeps Pi\'s AGENTS.md files and skills, with profile instructions last', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-prompt-'));
   const agentDir = join(dir, 'agent');

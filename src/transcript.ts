@@ -25,9 +25,9 @@ export function typedText(content: unknown) {
   const text = textContent(content, false);
   return { text, bare: text.replace(/\n\n\[Image[ :][^\n]*\](?:\n\[Image[ :][^\n]*\])*$/, '') };
 }
-/** Reports reach the model, memory and the previous-exchange replay exactly as the user messages they used to be. */
+/** Pi's convertToLlm sends every custom message, another extension's too, to the model as a user message. */
 export function asUser(message: AgentMessage): AgentMessage {
-  if (message.role !== 'custom' || message.customType !== REPORT_TYPE) return message;
+  if (message.role !== 'custom') return message;
   return { role: 'user', content: textContent(message.content), timestamp: message.timestamp };
 }
 export function logMessage(memory: Memory, message: AgentMessage, receipt?: string) {
@@ -78,7 +78,7 @@ export function previousExchange(branch: readonly SessionEntry[], limit = PREVIO
 function latestExchange(branch: readonly SessionEntry[]) {
   let end = -1;
   let legacyEnd = branch.length;
-  const messages = (entries: readonly SessionEntry[]) => entries.flatMap(entry => entry.type === 'message' ? [asUser(entry.message)] : entry.type === 'custom_message' && entry.customType === REPORT_TYPE ? [asUser({ role: 'custom', customType: entry.customType, content: entry.content, display: entry.display, timestamp: Date.parse(entry.timestamp) })] : []);
+  const messages = (entries: readonly SessionEntry[]) => entries.flatMap(entry => entry.type === 'message' ? [asUser(entry.message)] : entry.type === 'custom_message' ? [asUser({ role: 'custom', customType: entry.customType, content: entry.content, display: entry.display, timestamp: Date.parse(entry.timestamp) })] : []);
   for (let i = branch.length - 1; i >= 0; i--) {
     const entry = branch[i];
     if (entry.type !== 'custom' || entry.customType !== RUN_BOUNDARY || !record(entry.data)) continue;
