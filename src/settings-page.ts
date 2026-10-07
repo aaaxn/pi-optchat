@@ -71,7 +71,7 @@ class ModelStep extends Container {
   }
   private pickModel() {
     const { theme, current } = this, filter = new Input();
-    const items: SelectItem[] = this.models.map(({ name }) => ({ value: name, label: name }));
+    const items: SelectItem[] = this.models.map(({ name }) => ({ value: name, label: name, description: name === modelName(current) ? 'current' : undefined }));
     let list = new SelectList(items, 10, listTheme(theme));
     const build = () => {
       list = new SelectList(filter.getValue() ? fuzzyFilter(items, filter.getValue(), i => i.value) : items, 10, listTheme(theme));
@@ -106,6 +106,21 @@ class ModelStep extends Container {
   handleInput(data: string) { this.active.handleInput(data); }
 }
 
+/** Saves a change to the profile config and applies it in memory; returns the reason if it couldn't be written. */
+function update(o: Options, patch: Partial<ProfileConfig>) {
+  try { o.save({ ...o.config, ...patch }); }
+  catch (error) { return `Could not save: ${error instanceof Error ? error.message : String(error)}`; }
+  Object.assign(o.config, patch);
+  return undefined;
+}
+/** Bordered, titled like Pi's own dialogs. */
+function frame(theme: Theme, title: string, profile: string, body: Component[]) {
+  const page = new Container();
+  for (const child of [new DynamicBorder(s => theme.fg('border', s)), new Text(`${theme.bold(theme.fg('accent', title))}${theme.fg('muted', ` · ${profile}`)}`, 1, 0),
+    ...body, new DynamicBorder(s => theme.fg('border', s))]) page.addChild(child);
+  return page;
+}
+
 /** The page itself: Pi's settings list over this profile's config, one row per setting, saved on change. */
 export function settingsPage(theme: Theme, o: Options, close: () => void, redraw = () => {}) {
   const { config } = o;
@@ -113,11 +128,9 @@ export function settingsPage(theme: Theme, o: Options, close: () => void, redraw
   const marker = (same: boolean, fallback: string) => theme.fg('dim', same ? '  default' : `  default ${fallback}`);
   const value = (key: SettingKey, current: number | boolean) => `${show(key, current)}${marker(current === SETTINGS[key].default, show(key, SETTINGS[key].default))}`;
   const apply = (patch: Partial<ProfileConfig>, what: string, applies: string) => {
-    try { o.save({ ...config, ...patch }); }
-    catch (error) { return `Could not save: ${error instanceof Error ? error.message : String(error)}`; }
-    Object.assign(config, patch);
-    notice.setText(theme.fg('success', `Saved ${what}. `) + theme.fg('muted', applies));
-    return undefined;
+    const problem = update(o, patch);
+    if (!problem) notice.setText(theme.fg('success', `Saved ${what}. `) + theme.fg('muted', applies));
+    return problem;
   };
   const models = (['compactor', 'subagent'] as const).map((role): SettingItem => {
     const { label, description, applies } = ROLES[role];
@@ -152,13 +165,25 @@ export function settingsPage(theme: Theme, o: Options, close: () => void, redraw
     const problem = apply({ [key]: on }, `${SETTINGS[key].label.toLowerCase()} ${on ? 'on' : 'off'}`, SETTINGS[key].applies);
     if (problem) { list.updateValue(key, value(key, config[key])); notice.setText(theme.fg('error', problem)); }
   }, close);
-  const page = new Container();
-  for (const child of [new DynamicBorder(s => theme.fg('border', s)), new Text(`${theme.bold(theme.fg('accent', 'OptChat settings'))}${theme.fg('muted', ` · ${o.profile}`)}`, 1, 0),
+  const page = frame(theme, 'OptChat settings', o.profile, [
     new Text(theme.fg('dim', 'Saved as you change them · Victor\'s recipe by default, except Previous exchange and Summary size tolerance'), 1, 0),
-    new Spacer(1), list, notice, new DynamicBorder(s => theme.fg('border', s))]) page.addChild(child);
+    new Spacer(1), list, notice]);
   return Object.assign(page, { handleInput: (data: string) => { notice.setText(''); list.handleInput(data); redraw(); } });
+}
+
+/** Just the settings page's model step, for /optchat model and /optchat agents model: closes with the saved choice, or nothing on Esc. */
+export function modelPicker(theme: Theme, role: Role, o: Options, close: (choice?: ModelChoice) => void, redraw = () => {}) {
+  const step = new ModelStep(theme, role, o.models, o.config[role], choice => {
+    const problem = update(o, { [role]: choice });
+    if (!problem) close(choice);
+    return problem;
+  }, () => close());
+  return Object.assign(frame(theme, 'OptChat', o.profile, [new Spacer(1), step]), { handleInput: (data: string) => { step.handleInput(data); redraw(); } });
 }
 
 export function showSettings(ctx: ExtensionContext, o: Options) {
   return ctx.ui.custom<void>((tui, theme, _keys, done) => settingsPage(theme, o, () => done(undefined), () => tui.requestRender()));
+}
+export function showModelPicker(ctx: ExtensionContext, role: Role, o: Options) {
+  return ctx.ui.custom<ModelChoice | undefined>((tui, theme, _keys, done) => modelPicker(theme, role, o, done, () => tui.requestRender()));
 }

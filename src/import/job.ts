@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { Memory, bytes, isEntry, type Entry, type Compressor } from '../memory.ts';
 import { atomicWrite } from '../profiles.ts';
 import { record } from '../cache.ts';
-import type { ImportedEntry } from './sources.ts';
+import { copyKey, type ImportedEntry } from './sources.ts';
 
 export type ImportMode = 'append' | 'rebuild';
 export interface ImportJob {
@@ -40,11 +40,13 @@ export function pendingImport(dir: string): ImportJob | undefined {
 }
 export function deduplicate(existing: readonly Entry[], incoming: readonly ImportedEntry[]) {
   const receipts = new Set(existing.map(e => e.receipt).filter(Boolean));
+  const copies = new Set(existing.map(copyKey).filter(Boolean));
   const added: ImportedEntry[] = []; let skipped = 0;
   for (const entry of incoming) {
     if (!entry.receipt?.startsWith('import:')) throw new Error('Imported entry has no stable source identity.');
-    if (receipts.has(entry.receipt)) { skipped++; continue; }
-    receipts.add(entry.receipt); added.push(entry);
+    const copy = copyKey(entry);
+    if (receipts.has(entry.receipt) || copy && copies.has(copy)) { skipped++; continue; }
+    receipts.add(entry.receipt); if (copy) copies.add(copy); added.push(entry);
   }
   return { added, skipped };
 }

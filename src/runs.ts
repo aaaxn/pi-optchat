@@ -6,7 +6,8 @@ import { atomicWrite } from './profiles.ts';
 import { record } from './cache.ts';
 import { textContent } from './transcript.ts';
 
-export const runStates = ['running', 'waiting', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'] as const;
+/** `paused`: interrupted by the user with nothing queued, alive and waiting for its next message. `interrupted` is a finished run cut off by Pi closing or a connected window ending. */
+export const runStates = ['running', 'waiting', 'stopping', 'completed', 'failed', 'stopped', 'interrupted', 'paused'] as const;
 export type RunState = typeof runStates[number];
 export type FinishReason = 'complete' | 'disconnected' | 'owner-stopped' | 'failed';
 export interface RunInfo {
@@ -20,8 +21,9 @@ export interface RunInfo {
   guidance: { text: string; date: number; state: 'queued' | 'delivered' | 'undelivered'; from?: 'user' | 'manager' }[];
 }
 const moves: Record<RunState, readonly RunState[]> = {
-  running: ['waiting', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'],
-  waiting: ['running', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'],
+  running: ['waiting', 'paused', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'],
+  waiting: ['running', 'paused', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'],
+  paused: ['running', 'stopping', 'failed', 'stopped', 'interrupted'],
   stopping: ['stopped', 'failed', 'interrupted'],
   // A finished run only takes the outcome of a connected handoff.
   completed: ['interrupted'], failed: ['completed', 'interrupted'], stopped: ['completed', 'interrupted'], interrupted: ['completed'],
@@ -31,7 +33,9 @@ export function transition(run: RunInfo, to: RunState) {
   if (run.state !== to && !moves[run.state].includes(to)) return false;
   run.state = to; return true;
 }
-export const isActiveRun = (run: RunInfo) => run.state === 'running' || run.state === 'waiting' || run.state === 'stopping';
+export const isActiveRun = (run: RunInfo) => run.state === 'running' || run.state === 'waiting' || run.state === 'stopping' || run.state === 'paused';
+/** Live and working: a paused run is neither running nor finished. */
+export const isRunning = (run: RunInfo) => isActiveRun(run) && run.state !== 'paused';
 function isRun(value: unknown): value is RunInfo {
   return record(value) && ['id', 'task', 'cwd', 'model', 'thinking', 'parentSession'].every(k => typeof value[k] === 'string')
     && typeof value.id === 'string' && /^[a-zA-Z0-9-]+$/.test(value.id)

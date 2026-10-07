@@ -122,7 +122,7 @@ test('running tools show their real elapsed time, finished ones how long they to
   assert.doesNotMatch(draw(new TranscriptView(tui, process.cwd()).build('Build', [task, call, result])), /Took/, 'unknown start shows no time rather than a wrong one');
 });
 
-test('agent view drives a running agent: streaming, guidance from the input, drafts, and a two-press stop', async () => {
+test('agent view drives a running agent: streaming, guidance from the input, drafts, editing a queued message, interrupting, and a two-press stop', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-agent-live-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
@@ -157,13 +157,33 @@ test('agent view drives a running agent: streaming, guidance from the input, dra
     assert.match(text(), /Esc clear/);
     view.handleInput('\x1b');
     assert.equal(closed, 0, 'Esc clears a draft before it leaves');
-    assert.match(text(), /Esc back to main · Ctrl\+X stop/);
+    assert.match(text(), /Esc back to main · Ctrl\+C interrupt · Ctrl\+X stop/);
     for (const key of 'Please include tests.') view.handleInput(key);
     view.handleInput('\r');
     await until(() => children.history.records.get(id)?.guidance.length === 1);
     assert.deepEqual(children.history.records.get(id)?.guidance.map(g => [g.text, g.from]), [['Please include tests.', 'user']]);
     await children.tell(id, 'Main agent note.');
     assert.match(text(), /Queued \(main agent\): Main agent note\./);
+    assert.match(text(), /↑ edit queued/);
+    view.handleInput('\x1b[A');
+    assert.match(text(), /│? *Please include tests\.[^]*Esc clear/, 'Up pulls the queued message back into the input');
+    assert.deepEqual(children.history.records.get(id)?.guidance.map(g => g.text), ['Main agent note.']);
+    view.handleInput('\x03');
+    assert.equal(closed, 0, 'Ctrl+C first clears the pulled-back draft, which drops it');
+    assert.doesNotMatch(text(), /Please include tests\./);
+    view.handleInput('\x03');
+    await until(() => children.history.records.get(id)?.guidance[0].state === 'delivered');
+    await until(() => children.messages(id).some(m => m.role === 'user' && textContent(m.content) === 'Interrupted by the user:\n\nMain agent note.'));
+    assert.equal(children.history.records.get(id)?.state, 'running', 'an interrupt with a queued message keeps the agent going');
+    view.handleInput('\x03');
+    await until(() => children.history.records.get(id)?.state === 'paused');
+    assert.equal(closed, 0, 'with nothing queued it only pauses; the view stays');
+    assert.match(text().split('\n')[0], /interrupted · waiting for you/);
+    assert.doesNotMatch(text(), /Ctrl\+C interrupt/);
+    for (const key of 'Go on.') view.handleInput(key);
+    view.handleInput('\r');
+    await until(() => children.history.records.get(id)?.state === 'running');
+    assert.equal(children.history.records.get(id)?.guidance.at(-1)?.text, 'Go on.');
     view.handleInput('\x18');
     assert.match(text(), /Press Ctrl\+X again/);
     assert.equal(children.history.records.get(id)?.state, 'running', 'one press only asks');

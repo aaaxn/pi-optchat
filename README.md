@@ -44,10 +44,11 @@ For headless use, pass `--optchat-profile work`.
 | `/optchat` | Status and actions menu. |
 | `/optchat profile` | Select or create a profile. Switching starts a fresh Pi session. |
 | `/optchat settings` | This profile's settings: models, subagent levels and limits, previous exchange, summary size tolerance. |
-| `/optchat model` | Compactor model and effort for this profile. |
+| `/optchat model` | Compactor model and effort for this profile. Type to filter the models you are logged in to; the current one is marked. |
 | `/optchat agents` | Live agent tree and saved run history. |
-| `/optchat agents model` | Subagent model and effort for this profile. |
+| `/optchat agents model` | Subagent model and effort for this profile, picked the same way. |
 | `/optchat usage` | Token usage and cost estimates. |
+| `/optchat activity` | Memory gauge: view size, summaries catching up, running agents. |
 | `/optchat instructions` | Edit this profile's `AGENTS.md`. |
 | `/optchat browse` | Open a readable snapshot of memory: the shape of what the model sees, summaries you can open down to the original messages, and search that shows where each message is folded. Run again to refresh. |
 | `/optchat import` | Import history, or resume/discard a paused import. |
@@ -79,6 +80,7 @@ Compression and subagents make extra model requests with your provider credentia
 | Group subagent reports | on | The subagents started by one spawn report together, in one message once the last of them finishes (the recipe). Off: each reports as soon as it finishes. Applies to the next spawn. |
 | Previous exchange | on | Replays your last request and answer in full with the next turn (see below). Off is the recipe. |
 | Previous exchange limit | 16 KB | A larger last exchange is left out. |
+| Memory search | off | Gives the agent, and subagents started or resumed after the change, a `search` tool over your original messages (see below). Off is the recipe: zoom and date only. Applies from the next turn. |
 | Summary size tolerance | 640 bytes | The compactor is always asked for 512-byte lines; a longer line up to this size is kept instead of retried. 512 is the recipe's strict rule. |
 
 Numbers must be whole numbers of at least 1 (512 for the summary size tolerance). Missing keys in an older `config.json` take their defaults.
@@ -102,9 +104,9 @@ Ask in plain words, for example: "Spawn an agent to investigate this repository 
 - Stopping an agent stops its whole subtree. A failed parent stops its descendants.
 - Agents run inside the Pi process. Closing Pi stops them; there is no detached mode.
 
-## Agents and usage inspector
+## Agents, usage and activity inspector
 
-An **Agents | Usage** bar sits below the input.
+An **Agents | Usage | Activity** bar sits below the input.
 
 | Key | Action |
 | --- | --- |
@@ -112,7 +114,7 @@ An **Agents | Usage** bar sits below the input.
 | **Left/Right**, **Enter** | Pick and open a section |
 | **Escape**, **Up**, or typing | Back to the editor |
 | **F6** | Open Agents directly, keeping your draft |
-| **Tab** | Switch between Agents and Usage |
+| **Tab** | Cycle Agents, Usage and Activity |
 
 Set a different shortcut with `OPTCHAT_INSPECT_KEY=ctrl+shift+a pi`. If another extension supplies a custom editor, OptChat leaves its Down key alone; use the shortcut or commands instead.
 
@@ -122,16 +124,22 @@ Set a different shortcut with `OPTCHAT_INSPECT_KEY=ctrl+shift+a pi`. If another 
 
 | Key | Action |
 | --- | --- |
-| **Escape** or **Ctrl+C** | Clear a draft, else back to the main chat |
-| **Ctrl+X** twice | Stop this agent and the agents it started |
+| **Escape** | Clear a draft, else back to the main chat |
+| **Ctrl+C** | Clear a draft, else interrupt the agent's current step. Never ends the agent: queued messages go to it at once and it carries on; with none queued it waits for you (**interrupted · waiting for you**) until your next message, or a `tell` from the main agent, resumes it |
+| **Up** (empty input) | Take your newest queued message back to edit; send it again, or clear it to drop it |
+| **Ctrl+X** twice | Stop this agent and the agents it started (the only key that ends it) |
 | **Page Up/Down**, mouse wheel | Scroll; back at the bottom it follows again. The wheel needs Pi's default fullscreen mode |
 | **Ctrl+O** | Expand tool output (Pi's own toggle) |
 
-Guidance shows as queued until delivered, or undelivered if the child stops first. Guidance you send is also saved in main memory. Reasoning is not shown. Transcripts stay browsable after restart, and browsing them makes no model calls.
+Guidance shows as queued until delivered, or undelivered if the child stops first. When you interrupt an agent with nothing queued, the agent that started it gets a one-line note instead of a report, so it isn't left waiting. Guidance you send is also saved in main memory. Reasoning is not shown. Transcripts stay browsable after restart, and browsing them makes no model calls.
 
 **Usage** shows this session, last hour, today, last 7 days, or all time (**Left/Right**): one row per role and model (main agent, subagents, compactor, imports) with estimated cost, share of the total, output tokens, and how much input came from the cache. Costs are API prices, not your subscription bill.
 
 ![Usage page](docs/screenshots/usage.png)
+
+**Activity** is a memory gauge: how many messages the profile holds and how much of the 128 KB view they fill, then either **Settled** or **Catching up · 12 of 40 summaries** with a progress bar counted from when the backlog last grew from empty. If summarizing keeps failing, the last error and the retry countdown show under it. It also counts running agents, and interrupted ones waiting for you; their list is on Agents. While summaries or agents are at work, the bar's Activity item gets a **●**.
+
+![Activity page](docs/screenshots/activity.png)
 
 - Costs are API-rate estimates, not your subscription bill. Unknown rates show zero.
 - Record counts are not request counts; retries and tool overhead can add records.
@@ -153,7 +161,7 @@ Pick the destination profile, then run `/optchat import`.
 
 **Claude Code memories**: the auto-memory topic files in `~/.claude/projects/*/memory/` (not `MEMORY.md`, which only indexes them), picked by project. Each file becomes one dated note in the memory tree, not part of the prompt. An edited file comes in again as a newer note.
 
-**Duplicates**: re-importing skips messages already present, even if titles or paths changed. Changed source messages can appear as a separate historical version.
+**Duplicates**: re-importing skips messages already present, even if titles or paths changed. A resumed Claude Code session copies earlier messages into its own file; those copies are matched by message id and text, so they come in once, also against messages an earlier import stored. Changed source messages can appear as a separate historical version.
 
 **Pausing**: **Pause import** (or Escape) saves progress, and so does restarting Pi. `/optchat import` then offers **Resume** or **Discard staged import**. While an import is pending, chat in that profile is blocked; other profiles still work. Imports need the main agent and its subagents to be idle.
 
@@ -213,14 +221,15 @@ To delete a profile, delete its folder. Your original Pi sessions are kept in Pi
 
 ## How it differs from the recipe
 
-The recipe's four prompts are kept verbatim in `src/prompts.ts`, along with its numbers: 512-byte summary nodes (by default summaries up to 640 bytes are accepted without a retry, as long as they are smaller than what they replace; see Summary size tolerance), a 128,000-byte memory view, binary merges, 8 compression workers, fixed retry delays, 5 shortening attempts, and a 30,000-character tool output cap. Each compactor request shows a 512-byte example line for scale. It is a true line about OptChat itself, labelled as not from the chat and fenced off in `<example>` tags, with the text to summarize in `<input>` tags: shown bare, a made-up example was sometimes summarized as if it were chat and spread up the tree. Anthropic requests get stable cache breakpoints on the view, and when that view is not cached yet, one compactor call goes first and the others wait until it starts answering, so they read the cache instead of each writing it. See `docs/victor-recipe.md` for notes.
+The recipe's four prompts are kept verbatim in `src/prompts.ts` (the view doc adds one sentence: you can zoom out too, from a message to the summaries above it), along with its numbers: 512-byte summary nodes (by default summaries up to 640 bytes are accepted without a retry, as long as they are smaller than what they replace; see Summary size tolerance), a 128,000-byte memory view, binary merges, 8 compression workers, fixed retry delays, 5 shortening attempts, and a 30,000-character tool output cap. Each compactor request shows a 512-byte example line for scale. It is a true line about OptChat itself, labelled as not from the chat and fenced off in `<example>` tags, with the text to summarize in `<input>` tags: shown bare, a made-up example was sometimes summarized as if it were chat and spread up the tree. Anthropic requests get stable cache breakpoints on the view, and when that view is not cached yet, one compactor call goes first and the others wait until it starts answering, so they read the cache instead of each writing it. See `docs/victor-recipe.md` for notes.
 
 Each run's context is the memory view, the previous exchange, and your new message. Deliberate additions (the ones that change the recipe's behaviour are settings, see [Settings](#settings)):
 
 1. **Previous exchange kept verbatim.** Your last request (with any steering) and the final answer are included in full, so "why is that?" refers to what you actually read. Tool calls and reasoning are not carried over. It comes on top of the 128,000-byte view. If it is over 16,000 bytes (about 4,000 tokens, usually a big paste; Previous exchange limit) it is left out entirely, and the model relies on the view and zoom as in Victor's recipe. A new Pi session starts with the memory view only.
 2. **Subagents** are built in with Pi's SDK rather than a separate package. With Subagent levels above 1 they can delegate further.
-3. **Profiles**, the **inspector**, the **usage ledger**, **import**, and **connected windows** are additions. Import adds historical-record guidance to the prompts.
-4. **Not done**: computer use and hosting on an always-on machine.
+3. **Memory search** (off by default). With the setting on, the agent also gets `search(text, before?)`: plain, case-insensitive text matching over the original messages, never the summaries (a summary can be wrong, and one fact repeats at every level of the tree), skipping logged zoom and search results. It returns 20 hits at a time, newest first, each with its id, the view line that holds it when that is a summary (`1234 (in 1024+256)`), its date and a snippet; `before: id` pages back, and `zoom(id, 1)` reads a hit. One line about it is added to the system prompt. Turning it on or off changes the cached prompt once.
+4. **Profiles**, the **inspector**, the **usage ledger**, **import**, and **connected windows** are additions. Import adds historical-record guidance to the prompts.
+5. **Not done**: computer use and hosting on an always-on machine.
 
 ## Development
 

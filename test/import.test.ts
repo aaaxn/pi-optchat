@@ -251,6 +251,26 @@ test('Claude discovery keeps the parent conversation and skips modern, legacy, a
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('a resumed Claude session adds only its new messages, also over entries an older import stored with another header', async () => {
+  const dir = temp(), at = (s: number) => `2026-01-02T12:00:0${s}.000Z`, model = '<command-name>/model</command-name>\n<command-args>opus</command-args>';
+  const user = (uuid: string, session: string, content: string, s: number) => ({ type: 'user', uuid, sessionId: session, timestamp: at(s), message: { role: 'user', content } });
+  const reply = (uuid: string, session: string, text: string, s: number) => ({ type: 'assistant', uuid, sessionId: session, timestamp: at(s),
+    message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'thinking', thinking: 'hm' }, { type: 'text', text }] } });
+  // Claude Code copies the earlier messages into the resumed file, under the new session id.
+  const copied = (session: string) => [user('u1', session, model, 1), user('u2', session, 'q2', 2), reply('a2', session, 'r2', 3)];
+  lines(join(dir, 'aaaa.jsonl'), copied('aaaa'));
+  lines(join(dir, 'bbbb.jsonl'), [...copied('bbbb'), user('u3', 'bbbb', 'q3', 4), reply('a3', 'bbbb', 'r3', 5), user('u2', 'bbbb', 'q2 edited', 6)]);
+  const read = async (id: string) => (await readConversation({ ...conversation('claude', join(dir, `${id}.jsonl`)), id })).entries;
+  const body = (e: ImportedEntry) => e.text.slice(e.text.indexOf('\n') + 1);
+  try {
+    const [a, b] = [await read('aaaa'), await read('bbbb')];
+    assert.deepEqual(deduplicate([], [...a, ...b]).added.map(body), ['/model opus', 'q2', 'r2', 'q3', 'r3', 'q2 edited']);
+    // An older import stored the original with a longer header and the command as Claude Code logged it.
+    const stored = a.map((e, i) => ({ ...e, i, size: 0, text: `[Historical claude · ${e.date} · conversation aaaa · Fixture]\n${body(e) === '/model opus' ? model : body(e)}` }));
+    assert.deepEqual(deduplicate(stored, b).added.map(body), ['q3', 'r3', 'q2 edited'], 'a uuid with other text is another message');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('Claude discovery checks late sidechain markers without extending metadata extraction or Codex scanning', async () => {
   const dir = temp(), parent = join(dir, 'parent.jsonl'), child = join(dir, 'renamed-child.jsonl');
   const metadata = Array.from({ length: 60 }, () => ({ type: 'file-history-snapshot' }));

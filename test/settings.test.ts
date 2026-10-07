@@ -14,6 +14,7 @@ import { settingsPage } from '../src/settings-page.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { REPORT_TYPE, textContent } from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
+import { SEARCH_DOC } from '../src/tools.ts';
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 const model = { provider: 'fixture', model: 'fixture', thinking: 'off' } as const;
@@ -44,7 +45,7 @@ async function fixture(dir: string, reply: (context: Context) => string = () => 
   });
   return { runtime, releases };
 }
-async function children(dir: string, settings?: () => Pick<ProfileConfig, 'subagentLevels' | 'maxAgents'>) {
+async function children(dir: string, settings?: () => Partial<ProfileConfig>) {
   const { runtime, releases } = await fixture(dir);
   const memory = new Memory(join(dir, 'memory'), async input => input.source.slice(0, 100), () => {});
   const made = new Children(memory, new ModelRegistry(runtime), () => model, () => '', async () => {}, () => {}, dir,
@@ -56,8 +57,8 @@ test('a config.json from before settings existed loads with the defaults, and se
   const dir = mkdtempSync(join(tmpdir(), 'optchat-config-'));
   try {
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ compactor: defaults.compactor, subagent: defaults.subagent }));
-    assert.deepEqual(loadConfig(dir), { ...defaults, subagentLevels: 1, maxAgents: 8, previousExchange: true, previousExchangeKB: 16, summaryAcceptBytes: 640 });
-    const changed = { ...loadConfig(dir), subagentLevels: 3, maxAgents: 12, previousExchange: false, previousExchangeKB: 4, summaryAcceptBytes: 512 };
+    assert.deepEqual(loadConfig(dir), { ...defaults, subagentLevels: 1, maxAgents: 8, previousExchange: true, previousExchangeKB: 16, memorySearch: false, summaryAcceptBytes: 640 });
+    const changed = { ...loadConfig(dir), subagentLevels: 3, maxAgents: 12, previousExchange: false, previousExchangeKB: 4, memorySearch: true, summaryAcceptBytes: 512 };
     saveConfig(dir, changed);
     assert.deepEqual(loadConfig(dir), changed);
     for (const [key, value] of [['subagentLevels', 0], ['maxAgents', -1], ['previousExchangeKB', 1.5], ['subagentLevels', '3'], ['previousExchange', 'yes'], ['summaryAcceptBytes', 511], ['maxAgents', null]] as const) {
@@ -67,15 +68,27 @@ test('a config.json from before settings existed loads with the defaults, and se
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('by default only the main agent starts subagents: a child gets no spawn or tell', async () => {
+test('by default only the main agent starts subagents: a child gets no spawn or tell, nor search', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-levels-'));
   const { children: c, releases, close } = await children(dir);
   try {
     const [child] = await c.spawn([{ task: 'hold child' }], dir);
     await until(() => releases.size === 1);
     const tools = c.live(child)?.session.getActiveToolNames() ?? [];
-    assert.ok(tools.includes('zoom') && !tools.includes('spawn') && !tools.includes('tell'));
+    assert.ok(tools.includes('zoom') && !tools.includes('spawn') && !tools.includes('tell') && !tools.includes('search'));
     await assert.rejects(c.spawn([{ task: 'nested' }], dir, undefined, child), /allows 1 level of subagents/);
+  } finally { await close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('with Memory search on, a subagent gets the search tool and its prompt line', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-search-child-'));
+  const { children: c, releases, close } = await children(dir, () => ({ memorySearch: true }));
+  try {
+    const [child] = await c.spawn([{ task: 'hold child' }], dir);
+    await until(() => releases.size === 1);
+    const session = c.live(child)!.session;
+    assert.ok(session.getActiveToolNames().includes('search'));
+    assert.ok(session.systemPrompt.includes(SEARCH_DOC.trim()));
   } finally { await close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -244,6 +257,54 @@ test('turning Previous exchange off also reaches a turn that a subagent report s
   }
 });
 
+test('Memory search turned on and off in /optchat settings adds and removes the tool and its prompt line, also for a report turn', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-search-'));
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  const turns: Context[] = [];
+  const { runtime } = await fixture(dir, context => {
+    if (context.messages.some(m => m.role === 'system' && m.content === COMPACT)) return 'summary';
+    turns.push(context);
+    return 'ok';
+  });
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    saveConfig(profilePath('fixture'), { ...loadConfig(profilePath('fixture')), compactor: model });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.inMemory(dir);
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'search'] })).session;
+    // The settings page, driven by keys: down to Memory search, toggle it, close.
+    const custom = (async (factory: (tui: unknown, theme: Theme, keys: unknown, done: (result: undefined) => void) => Component) => {
+      const page = factory({ requestRender: () => {} }, plain, {}, () => {});
+      for (const key of ['\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', ' ', '\x1b']) page.handleInput?.(key);
+    }) as unknown as ExtensionUIContext['custom'];
+    await session.bindExtensions({ uiContext: { ...session.extensionRunner.getUIContext(), custom }, mode: 'tui' });
+    // Pi declares the tools on the leading system message, next to the prompt.
+    const search = ({ messages: [system] }: Context) => system.role === 'system'
+      ? [!!system.toolsAdded?.some(t => t.name === 'search'), JSON.stringify(system.content).includes('search(text)')] : [];
+    await session.prompt('Hello.');
+    assert.deepEqual(search(turns.at(-1)!), [false, false], 'off by default');
+    await session.prompt('/optchat settings');
+    assert.equal(loadConfig(profilePath('fixture')).memorySearch, true);
+    // A report turn started while idle skips before_agent_start, and still gets the change.
+    await session.sendCustomMessage({ customType: REPORT_TYPE, content: '[8964a512] Done.', display: true }, { triggerTurn: true, deliverAs: 'steer' });
+    await session.agent.waitForIdle();
+    assert.deepEqual(search(turns.at(-1)!), [true, true]);
+    await session.prompt('/optchat settings');
+    await session.prompt('Again.');
+    assert.deepEqual(search(turns.at(-1)!), [false, false]);
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the thinking step offers only levels the model takes, so Sonnet 5.5 has no "off" that would run at high effort', () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-page-'));
   try {
@@ -258,4 +319,49 @@ test('the thinking step offers only levels the model takes, so Sonnet 5.5 has no
     page.handleInput('\x1b[A'); page.handleInput('\r'); // up from the current "medium" to "low"
     assert.deepEqual(config.compactor, { provider: 'anthropic', model: 'claude-sonnet-5-5', thinking: 'low' });
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('/optchat model and /optchat agents model pick from a searchable list that scrolls, so the last model is reachable', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-picker-'));
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  const { runtime } = await fixture(dir);
+  const ids = Array.from({ length: 30 }, (_, i) => `model-${String(i).padStart(2, '0')}`);
+  runtime.registerProvider('many', { baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: ids.map(id => ({ id, name: id, reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 })) });
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    saveConfig(profilePath('fixture'), { ...loadConfig(profilePath('fixture')), compactor: model });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.inMemory(dir);
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom'] })).session;
+    const screens: string[] = [];
+    const custom = (async (factory: (tui: unknown, theme: Theme, keys: unknown, done: (result: unknown) => void) => Component) => {
+      let result: unknown;
+      const picker = factory({ requestRender: () => {} }, plain, {}, value => { result = value; });
+      screens.push(picker.render(100).join('\n'));
+      for (const key of ['2', '9']) picker.handleInput?.(key);
+      screens.push(picker.render(100).join('\n'));
+      for (const key of ['\r', '\r']) picker.handleInput?.(key); // the model, then its only thinking level
+      return result;
+    }) as unknown as ExtensionUIContext['custom'];
+    await session.bindExtensions({ uiContext: { ...session.extensionRunner.getUIContext(), custom }, mode: 'tui' });
+    await session.prompt('/optchat model');
+    const [full, filtered] = screens;
+    assert.match(full, /fixture\/fixture\s+current/, 'the current model is marked');
+    assert.ok(!full.includes('many/model-29') && full.split('\n').filter(line => line.includes('many/')).length <= 10, 'the list scrolls instead of growing past the screen');
+    assert.ok(filtered.includes('many/model-29'));
+    assert.deepEqual(loadConfig(profilePath('fixture')).compactor, { provider: 'many', model: 'model-29', thinking: 'off' });
+    await session.prompt('/optchat agents model');
+    assert.deepEqual(loadConfig(profilePath('fixture')).subagent, { provider: 'many', model: 'model-29', thinking: 'off' });
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

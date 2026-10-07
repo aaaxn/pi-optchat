@@ -1,7 +1,8 @@
 import { matchesKey, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable } from '@earendil-works/pi-tui';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { Children } from './agents.ts';
-import { isActiveRun } from './runs.ts';
+import type { Memory } from './memory.ts';
+import { isActiveRun, isRunning } from './runs.ts';
 import type { Usage } from '@earendil-works/pi-ai';
 import { ranges, summarizeUsage, type UsageLedger, type UsageRange, type UsageRole } from './usage.ts';
 
@@ -32,12 +33,16 @@ const spread = (left: string, right: string, width: number) => {
   const gap = width - visibleWidth(left) - visibleWidth(right);
   return gap >= 2 ? `${left}${' '.repeat(gap)}${right}` : left;
 };
-export type InspectorPage = 'agents' | 'usage';
+const pages = ['agents', 'usage', 'activity'] as const;
+export type InspectorPage = typeof pages[number];
+const pageNames: Record<InspectorPage, string> = { agents: 'Agents', usage: 'Usage', activity: 'Activity' };
+/** Tab order, wrapping around: Agents, Usage, Activity. */
+export const nextPage = (page: InspectorPage, delta = 1) => pages[(pages.indexOf(page) + delta + pages.length) % pages.length];
 /** Closing the panel either picks the subagent model or opens one agent's conversation. */
 export type InspectorAction = 'model' | { open: string };
 type Tone = 'accent' | 'muted' | 'dim' | 'error' | 'warning' | 'border';
 interface Options {
-  profile: string; session: string; children: Children; usage: UsageLedger; page: InspectorPage;
+  profile: string; session: string; children: Children; usage: UsageLedger; memory: Pick<Memory, 'root' | 'size' | 'budget' | 'lastError' | 'progress' | 'onChange'>; page: InspectorPage;
   rows: () => number; redraw: () => void; done: (action?: InspectorAction) => void;
   color: (tone: Tone, text: string) => string;
   context: () => number | null | undefined;
@@ -56,12 +61,12 @@ export class Inspector implements Component, Focusable {
   private hintLines = 1;
   private range: UsageRange = 'This session';
   private ended = false;
-  private readonly unsubscribe: () => void;
+  private readonly unsubscribe: (() => void)[];
   private readonly timer: ReturnType<typeof setInterval>;
   constructor(private readonly options: Options) {
     this.page = options.page;
     this.selected = options.children.history.list()[0]?.id;
-    this.unsubscribe = options.children.subscribe(() => options.redraw());
+    this.unsubscribe = [options.children.subscribe(() => options.redraw()), options.memory.onChange(() => options.redraw())];
     this.timer = setInterval(() => { options.refreshUsage?.(); options.redraw(); }, 1000); this.timer.unref();
     options.signal?.addEventListener('abort', this.abort, { once: true });
     if (options.signal?.aborted) queueMicrotask(this.abort);
@@ -69,7 +74,7 @@ export class Inspector implements Component, Focusable {
   private readonly abort = () => this.finish();
   private finish(action?: InspectorAction) { if (!this.ended) { this.dispose(); this.options.done(action); } }
   dispose() {
-    this.ended = true; clearInterval(this.timer); this.unsubscribe(); this.options.signal?.removeEventListener('abort', this.abort);
+    this.ended = true; clearInterval(this.timer); this.unsubscribe.forEach(stop => stop()); this.options.signal?.removeEventListener('abort', this.abort);
   }
   invalidate() {}
   /** Body rows left after the rules, title, hint and spacing; the rest of the screen keeps the footer visible. */
@@ -82,9 +87,10 @@ export class Inspector implements Component, Focusable {
   handleInput(data: string) {
     if (this.ended) return;
     if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) return this.finish();
-    if (data === 'u' || matchesKey(data, 'tab')) {
-      this.page = this.page === 'agents' ? 'usage' : 'agents'; this.scroll = 0;
-    } else if (this.page === 'usage') {
+    if (matchesKey(data, 'tab')) {
+      this.page = nextPage(this.page); this.scroll = 0;
+    } else if (this.page === 'activity') this.scrollInput(data);
+    else if (this.page === 'usage') {
       if (matchesKey(data, 'left') || matchesKey(data, 'right')) {
         const delta = matchesKey(data, 'left') ? -1 : 1;
         this.range = ranges[(ranges.indexOf(this.range) + delta + ranges.length) % ranges.length]; this.scroll = 0;
@@ -137,17 +143,29 @@ export class Inspector implements Component, Focusable {
     lines.push('', color('dim', 'Estimated at API prices, not your subscription bill.'), ...usage.warnings.map(w => color('warning', w)));
     return lines.flatMap(l => l ? wrapTextWithAnsi(l, width) : ['']);
   }
+  /** Memory as a gauge: how full the view is, whether summaries are catching up, and how many agents run (their list is one Tab away). */
+  private activityLines(width: number) {
+    const { memory, children, color } = this.options;
+    const { done, total, retryIn } = memory.progress();
+    const list = children.history.list(), agents = list.filter(isRunning).length, paused = list.filter(r => r.state === 'paused').length;
+    const filled = total ? Math.floor(10 * done / total) : 0;
+    const lines = [`${color('muted', 'Memory')} · ${count(memory.root.length)} messages · view ${Math.round(memory.size / 1000)} KB / ${Math.round(memory.budget / 1000)} KB`,
+      total ? `Catching up · ${count(done)} of ${count(total)} summaries  ${color('accent', '█'.repeat(filled))}${color('dim', '░'.repeat(10 - filled))}` : color('dim', 'Settled')];
+    if (memory.lastError) lines.push(color('dim', `${oneLine(memory.lastError)}${retryIn === undefined ? '' : ` · retry in ${elapsed(retryIn)}`}`));
+    lines.push('', `${color('muted', 'Agents')} · ${agents} running${paused ? ` · ${paused} interrupted` : ''}`);
+    return lines.flatMap(l => l ? wrapTextWithAnsi(l, width) : ['']);
+  }
   render(width: number): string[] {
     const { color, children, profile } = this.options;
     const inner = Math.max(1, width - 2);
-    let title = `OptChat · ${profile} · ${this.page === 'usage' ? 'Usage' : 'Agents'}`;
+    let title = `OptChat · ${profile} · ${pageNames[this.page]}`;
     let info: string, body: string[], hint: string;
-    if (this.page === 'usage') {
-      const lines = this.usageLines(inner); this.lineCount = lines.length;
+    if (this.page !== 'agents') {
+      const lines = this.page === 'usage' ? this.usageLines(inner) : this.activityLines(inner); this.lineCount = lines.length;
       this.scroll = Math.max(0, Math.min(this.scroll, lines.length - this.height));
       body = lines.slice(this.scroll, this.scroll + this.height);
-      info = `${this.scroll + 1}–${Math.min(this.scroll + this.height, lines.length)} / ${lines.length}`;
-      hint = '←→ period · ↑↓ scroll · Tab agents · Esc close';
+      info = this.page === 'usage' || lines.length > this.height ? `${this.scroll + 1}–${Math.min(this.scroll + this.height, lines.length)} / ${lines.length}` : '';
+      hint = this.page === 'usage' ? '←→ period · ↑↓ scroll · Tab activity · Esc close' : '↑↓ scroll · Tab agents · Esc close';
     } else {
       const list = children.history.list();
       if (!this.selected) this.selected = list[0]?.id;
@@ -157,7 +175,7 @@ export class Inspector implements Component, Focusable {
       if (cursor >= this.top + this.height) this.top = cursor - this.height + 1;
       const rows = list.slice(this.top, this.top + this.height).map(run => {
         const live = children.live(run.id), tools = live ? [...live.tools.values()].map(t => t.name).join(', ') : '';
-        const status = live ? `${run.state === 'stopping' ? 'stopping' : run.state === 'waiting' ? 'waiting for children' : tools || (live.streaming ? 'responding' : 'working')} · ${elapsed(Date.now() - live.updated)} ago` : run.state;
+        const status = live ? `${run.state === 'stopping' ? 'stopping' : run.state === 'waiting' ? 'waiting for children' : run.state === 'paused' ? 'interrupted · waiting for you' : tools || (live.streaming ? 'responding' : 'working')} · ${elapsed(Date.now() - live.updated)} ago` : run.state;
         return { run, task: `${'  '.repeat(run.depth - 1)}${run.parentId ? '↳ ' : ''}${oneLine(run.task)}`, status, time: elapsed((run.ended ?? Date.now()) - run.started) };
       });
       // Columns: task (flexible) · status · duration (right-aligned); status yields first on narrow screens.

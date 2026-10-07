@@ -1,8 +1,9 @@
 import { CustomEditor, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { matchesKey, truncateToWidth, visibleWidth, type KeyId } from '@earendil-works/pi-tui';
 import type { Children } from './agents.ts';
-import { inspectorShowing, type InspectorPage } from './inspector.ts';
-import { isActiveRun } from './runs.ts';
+import type { Memory } from './memory.ts';
+import { inspectorShowing, nextPage, type InspectorPage } from './inspector.ts';
+import { isRunning } from './runs.ts';
 
 /** Configured before extension registration; this also works in legacy terminals with F6. */
 export function inspectorShortcut(value = process.env.OPTCHAT_INSPECT_KEY ?? 'f6'): KeyId {
@@ -22,7 +23,7 @@ export class BarNavigation {
     }
     if (matchesKey(data, 'escape') || matchesKey(data, 'up')) { this.selected = undefined; return true; }
     if (matchesKey(data, 'left') || matchesKey(data, 'right') || matchesKey(data, 'tab')) {
-      this.selected = this.selected === 'agents' ? 'usage' : 'agents'; return true;
+      this.selected = nextPage(this.selected, matchesKey(data, 'left') ? -1 : 1); return true;
     }
     if (matchesKey(data, 'return')) { const page = this.selected; this.selected = undefined; open(page); return true; }
     if (matchesKey(data, 'down')) return true;
@@ -30,7 +31,7 @@ export class BarNavigation {
   }
 }
 
-export function mountNavigation(ctx: ExtensionContext, children: Children, shortcut: string, open: (page: InspectorPage) => void) {
+export function mountNavigation(ctx: ExtensionContext, children: Children, memory: Pick<Memory, 'progress' | 'onChange'>, shortcut: string, open: (page: InspectorPage) => void) {
   const navigation = new BarNavigation();
   const previous = ctx.ui.getEditorComponent();
   let redraw = () => {};
@@ -51,18 +52,18 @@ export function mountNavigation(ctx: ExtensionContext, children: Children, short
       invalidate() {},
       render(width: number) {
         if (inspectorShowing()) return []; // The open panel replaces the editor and this bar.
-        const list = children.history.list(), running = list.filter(isActiveRun).length;
+        const list = children.history.list(), running = list.filter(isRunning).length, paused = list.filter(r => r.state === 'paused').length;
         const label = (page: InspectorPage, text: string) => navigation.selected === page ? theme.fg('accent', `› ${text}`) : theme.fg('muted', text);
-        const left = `${label('agents', `Agents: ${running} running · ${list.length - running} saved`)}   ${label('usage', 'Usage')}`;
+        const left = `${label('agents', `Agents: ${running} running${paused ? ` · ${paused} interrupted` : ''} · ${list.length - running - paused} saved`)}   ${label('usage', 'Usage')}   ${memory.progress().total || running ? theme.fg('accent', '● ') : ''}${label('activity', 'Activity')}`;
         const hint = theme.fg('dim', navigation.selected ? '←→ select · Enter open · Esc input' : `${previous ? '' : '↓ select · '}${shortcut} inspect`);
         const gap = width - visibleWidth(left) - visibleWidth(hint);
         return [truncateToWidth(gap >= 3 ? `${left}${' '.repeat(gap)}${hint}` : `${left}   ${hint}`, width)];
       },
     };
   }, { placement: 'belowEditor' });
-  const unsubscribe = children.subscribe(() => redraw());
+  const unsubscribe = [children.subscribe(() => redraw()), memory.onChange(() => redraw())];
   return () => {
-    unsubscribe(); ctx.ui.setWidget('optchat-agents', undefined);
+    unsubscribe.forEach(stop => stop()); ctx.ui.setWidget('optchat-agents', undefined);
     if (!previous && ctx.ui.getEditorComponent() === factory) ctx.ui.setEditorComponent(undefined);
   };
 }

@@ -7,7 +7,7 @@ import * as sdk from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import { SUBAGENT, VIEW_DOC } from './prompts.ts';
-import { memoryTools } from './tools.ts';
+import { memoryTools, SEARCH_DOC, searchTool } from './tools.ts';
 import { type Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
 import { cachePayload } from './cache.ts';
@@ -23,6 +23,10 @@ export interface LiveRun {
   session: AgentSession; info: RunInfo; updated: number; streaming?: AgentMessage;
   tools: Map<string, { name: string; args: unknown; output?: unknown; started: number }>;
   pendingReports: string[]; pendingGuidance: string[]; wake?: () => void; completion?: Promise<void>;
+  /** Set by the user's interrupt: the queued guidance the run continues with once its current step is aborted; with none, it pauses. */
+  interruption?: RunInfo['guidance'];
+  /** Messages being steered back into Pi's queue after it was cleared; other queue changes wait for it. */
+  requeueing?: Promise<void>;
   /** Shared by the children of one spawn whose reports are delivered together, in spawn order. */
   batch?: { ids: string[]; reports: Map<string, string> };
 }
@@ -51,6 +55,8 @@ export const taskDirectory = (cwd: string, path = '.', windows = process.platfor
   resolve(cwd, path.replace(windows ? /^~(?=$|[\\/])/ : /^~(?=$|\/)/, homedir()));
 export const CWD_DOC = 'Project directory the subagent works in (~ allowed); its AGENTS.md files load from there. Defaults to your current directory.';
 const isOptchat = (path: string) => packageName(path) === 'pi-optchat';
+/** Pi hands steering to a run only between tool calls, so one long command keeps the parent and the user from reaching it. */
+export const STEERABLE = 'Never block in a single command for more than about 60 seconds. To wait for something, poll in short separate tool calls (for example one `sleep 30` per call), so messages from your parent or the user can reach you between calls.';
 
 // Pi's CLI adds its built-in extensions (MCP, codemode, tool search) to its own session; SDK sessions such as
 // subagents must add them. Pi versions that do not export a factory simply do not get that extension.
@@ -209,9 +215,9 @@ export class Children {
   private async open(o: { id: string; directory: string; depth: number; parentId?: string; connected: boolean; provider: string; model: Model<Api>;
     thinking?: ModelChoice['thinking']; sessionManager: SessionManager }) {
     const { id, directory, depth, parentId, connected } = o;
-    const { subagentLevels, maxAgents } = this.settings, delegates = depth < subagentLevels;
+    const { subagentLevels, maxAgents, memorySearch } = this.settings, delegates = depth < subagentLevels;
     const delegation = delegates ? `You may delegate parts of your assigned task with spawn when useful. Child reports arrive automatically after your current run ends; the harness keeps you alive to receive them. Never poll, sleep, or wait in a tool for children. Finish your current work and return; you will be prompted with their results. The profile allows ${maxAgents} active agents total.` : 'You are at the maximum delegation depth. Complete your task with your own tools.';
-    const instructions = [this.instructions(), delegation, connected ? 'You are speaking directly with the user in a connected window. Continue this conversation across requests. Use tell_parent for questions or findings the main agent needs now. A handoff will be generated when the user completes or disconnects the window.'
+    const instructions = [this.instructions(), delegation, STEERABLE, connected ? 'You are speaking directly with the user in a connected window. Continue this conversation across requests. Use tell_parent for questions or findings the main agent needs now. A handoff will be generated when the user completes or disconnects the window.'
       : 'Use tell_parent only when your parent needs something now (a blocking question, an important early finding, or when asked to). Your final answer is delivered automatically; do not repeat it with tell_parent.'].filter(Boolean).join('\n\n');
     // The user's settings list their installed packages; a copy in memory keeps the child from writing them back.
     const settingsManager = SettingsManager.inMemory({ ...SettingsManager.create(directory, getAgentDir()).getSettings(), compaction: { enabled: false }, cacheWarming: 'off' });
@@ -223,7 +229,7 @@ export class Children {
         if (provider) pi.registerProvider(o.provider, provider);
         // Same prompt as the main agent (AGENTS.md files, skills, cwd); only the OptChat preamble differs.
         pi.on('before_agent_start', event => {
-          event.systemPromptOptions.customPrompt = `${SUBAGENT}\n\n${VIEW_DOC}`;
+          event.systemPromptOptions.customPrompt = `${SUBAGENT}\n\n${VIEW_DOC}${memorySearch ? SEARCH_DOC : ''}`;
           event.systemPromptOptions.sections.instructions = instructions;
         });
         pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
@@ -232,7 +238,7 @@ export class Children {
     await loader.reload();
     const { session } = await (this.options.createSession ?? createAgentSession)({ cwd: directory, resourceLoader: loader, settingsManager,
       model: o.model, thinkingLevel: o.thinking, sessionManager: o.sessionManager,
-      customTools: [...memoryTools(() => this.memory), ...(delegates ? this.delegationTools(id, directory, subagentLevels, maxAgents) : []), this.parentTool(id, parentId, connected)],
+      customTools: [...memoryTools(() => this.memory), ...(memorySearch ? [searchTool(() => this.memory)] : []), ...(delegates ? this.delegationTools(id, directory, subagentLevels, maxAgents) : []), this.parentTool(id, parentId, connected)],
       excludeTools: delegates ? [] : ['spawn', 'tell'],
     });
     // Callers track the session only after this returns: clean up here if its extensions fail to start.
@@ -260,15 +266,20 @@ export class Children {
         const message = args.message.trim();
         if (!message) throw new Error('Message is empty.');
         const text = `[${id}] ${connected ? 'Connected agent message' : 'Message from subagent (still running)'}: ${message}`;
-        if (!parentId) { await this.report(text); return result('Message sent to the main agent.'); }
-        const parent = this.running.get(parentId);
-        if (!parent || !['running', 'waiting'].includes(parent.info.state)) throw new Error('Your parent is no longer running.');
-        if (parent.info.state === 'waiting') { parent.pendingReports.push(text); parent.wake?.(); }
-        else await parent.session.steer(text);
-        this.changed();
-        return result(`Message sent to parent ${parentId}.`);
+        if (!await this.toParent(parentId, text)) throw new Error('Your parent is no longer running.');
+        return result(parentId ? `Message sent to parent ${parentId}.` : 'Message sent to the main agent.');
       },
     };
+  }
+  /** A mid-run message to a child's parent: false if that parent is no longer running. */
+  private async toParent(parentId: string | undefined, text: string) {
+    if (!parentId) { await this.report(text); return true; }
+    const parent = this.running.get(parentId);
+    if (!parent || !['running', 'waiting', 'paused'].includes(parent.info.state)) return false;
+    if (parent.info.state === 'running') await parent.session.steer(text);
+    else { parent.pendingReports.push(text); parent.wake?.(); } // A paused parent keeps it until the user resumes it.
+    this.changed();
+    return true;
   }
   private async shutdown(session: AgentSession) {
     try { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); }
@@ -287,8 +298,36 @@ export class Children {
       if (this.closing || info.handoff || state === 'stopping') throw new Error('Stopped before its first request.');
       await session.prompt(prompt);
       while (info.state !== 'stopping') {
+        if (live.interruption) {
+          const guidance = live.interruption.filter(g => g.state === 'queued');
+          // Read Pi's queue only once a rebuild has landed, and take the interrupt's messages off it so they arrive once.
+          // Until this is done, tell() holds new messages in pendingGuidance, where the turn below or a pause picks them up.
+          await live.requeueing;
+          const texts = new Set(guidance.map(g => g.text));
+          await this.requeue(live, session.clearQueue().steering.filter(text => !texts.has(text)));
+          live.interruption = undefined;
+          if (!guidance.length) {
+            // Nothing to hand over: the run waits for its next message instead of ending, and whoever waits on its report hears why.
+            if (transition(info, 'paused')) {
+              this.save(info);
+              if (!info.connected) await this.toParent(info.parentId, `[${info.id}] Interrupted by the user; it waits for their next message, so no report until then.`)
+                .catch(error => this.warn(`Could not tell the parent about the interrupt: ${String(error)}`));
+            }
+            continue;
+          }
+          if (!transition(info, 'running')) continue; // A stop during the cleanup wins.
+          for (const g of guidance) g.state = 'delivered';
+          this.save(info);
+          await session.prompt(`Interrupted by the user:\n\n${guidance.map(g => g.text).join('\n\n')}`);
+          continue;
+        }
+        const paused = info.state === 'paused';
+        if (paused && !live.pendingGuidance.length) {
+          await new Promise<void>(resolve => { live.wake = resolve; }); live.wake = undefined;
+          continue;
+        }
         const last = session.messages.findLast(m => m.role === 'assistant');
-        if (last?.role === 'assistant' && (last.stopReason === 'error' || last.stopReason === 'aborted')) break;
+        if (!paused && last?.role === 'assistant' && (last.stopReason === 'error' || last.stopReason === 'aborted')) break;
         if (live.pendingGuidance.length) {
           transition(info, 'running'); this.save(info);
           await session.prompt(live.pendingGuidance.shift()!);
@@ -357,19 +396,65 @@ export class Children {
   async tell(id: string, message: string, source: 'manager' | 'user' = 'manager', caller?: string) {
     const live = this.running.get(id);
     if (!live && source === 'manager' && this.history.records.has(id)) return this.track(this.resume(id, message, caller));
-    if (live && !['running', 'waiting'].includes(live.info.state)) throw new Error(`${id} is finishing. Its report will arrive on its own${live.info.connected || source === 'user' ? '' : '; tell it again after that to resume it'}.`);
+    if (live && !['running', 'waiting', 'paused'].includes(live.info.state)) throw new Error(`${id} is finishing. Its report will arrive on its own${live.info.connected || source === 'user' ? '' : '; tell it again after that to resume it'}.`);
     if (!live) throw new Error(`No running subagent ${id}.`);
     const text = live.info.connected && source === 'manager' ? `[Main agent guidance]\n${message.trim()}` : message.trim(); if (!message.trim()) throw new Error('Message is empty.');
     if (source === 'user') this.memory.append('user', `Direct guidance to subagent [${id}]: ${text}`);
     const guidance: RunInfo['guidance'][number] = { text, date: Date.now(), state: 'queued', from: source };
     live.info.guidance.push(guidance); this.save(live.info);
     try {
-      if (live.info.state === 'waiting') { live.pendingGuidance.push(text); live.wake?.(); }
-      else await live.session.steer(text);
+      await live.requeueing; // Keeps the queue in the order messages were sent.
+      if (live.info.state === 'running' && !live.interruption) await live.session.steer(text);
+      else { live.pendingGuidance.push(text); live.wake?.(); } // Waiting, paused or being interrupted: this message starts its next turn.
     }
     catch (error) { guidance.state = 'undelivered'; this.save(live.info); throw error; }
     if (guidance.state === 'undelivered') throw new Error(`${id} finished before it read the message. Tell it again to resume it.`);
     return 'Message queued for the next tool boundary.';
+  }
+  /**
+   * The user's Ctrl+C, never destructive: aborts the current step. With guidance queued, the run continues at once with it;
+   * with none, it pauses until the next message (from the user or a tell). Only stop() ends a run.
+   */
+  async interrupt(id: string): Promise<'continued' | 'paused'> {
+    const live = this.running.get(id);
+    if (live?.info.state === 'paused') return 'paused';
+    if (!live || !['running', 'waiting'].includes(live.info.state)) throw new Error(`No running subagent ${id}.`);
+    const guidance = live.info.guidance.filter(g => g.state === 'queued');
+    // Nothing yields before the abort starts, so the run cannot finish in between and drop the messages.
+    // They leave pendingGuidance here and Pi's steering queue in execute(), which then sends them in one prompt.
+    const texts = new Set(guidance.map(g => g.text));
+    live.pendingGuidance = live.pendingGuidance.filter(text => !texts.has(text));
+    live.interruption = guidance;
+    live.wake?.();
+    await live.session.abort();
+    return guidance.length ? 'continued' : 'paused';
+  }
+  /** Takes the user's newest undelivered message back off the queue, to edit it; undefined when there is none left to take. */
+  withdraw(id: string) {
+    const live = this.running.get(id);
+    const text = live?.info.guidance.findLast(g => g.state === 'queued' && g.from === 'user')?.text;
+    if (!live || text === undefined || live.requeueing || live.interruption) return undefined;
+    // The queue holds only texts, so of equal ones the last is taken back, record and queue entry alike.
+    const guidance = live.info.guidance.findLast(g => g.state === 'queued' && g.text === text)!;
+    const pending = live.pendingGuidance.lastIndexOf(guidance.text);
+    if (pending >= 0) live.pendingGuidance.splice(pending, 1);
+    else {
+      const steering = live.session.getSteeringMessages();
+      const at = steering.lastIndexOf(guidance.text);
+      if (at < 0) return undefined; // Already on its way to the agent.
+      // Pi cannot drop a single queued message: clear the queue and steer the rest back in order.
+      void this.requeue(live, live.session.clearQueue().steering.filter((_, i) => i !== at));
+    }
+    live.info.guidance.splice(live.info.guidance.indexOf(guidance), 1); this.save(live.info);
+    return guidance.text;
+  }
+  private requeue(live: LiveRun, texts: string[]) {
+    const work: Promise<void> = (async () => {
+      try { for (const text of texts) await live.session.steer(text); }
+      catch (error) { this.warn(`Could not requeue a message for ${live.info.id}: ${String(error)}`); }
+    })().finally(() => { if (live.requeueing === work) live.requeueing = undefined; });
+    live.requeueing = work;
+    return work;
   }
   /** Reopens a finished child from its saved transcript, same ID, parent and model, and gives it a new message. */
   private async resume(id: string, message: string, caller: string | undefined) {
@@ -380,7 +465,7 @@ export class Children {
     if (run.parentId !== caller) {
       if (!run.parentId) throw new Error(`Only the main agent can resume ${id}.`);
       const parent = this.running.get(run.parentId);
-      throw new Error(parent && ['running', 'waiting'].includes(parent.info.state) ? `Only ${id}'s parent ${run.parentId} can resume it. Ask ${run.parentId} with tell.`
+      throw new Error(parent && ['running', 'waiting', 'paused'].includes(parent.info.state) ? `Only ${id}'s parent ${run.parentId} can resume it. Ask ${run.parentId} with tell.`
         : `Only ${id}'s parent ${run.parentId} can resume it, and that parent is no longer running. Resume ${run.parentId} instead, or spawn a new subagent.`);
     }
     if (this.closing) throw new Error('Profile is closing.');
@@ -399,7 +484,7 @@ export class Children {
       const session = await this.open({ id, directory: run.cwd, depth: run.depth, parentId: run.parentId, connected: false, provider, model, sessionManager: manager });
       // stop() cannot see this child until it is registered, so a parent stopped meanwhile must cancel it here.
       const parent = run.parentId ? this.running.get(run.parentId) : undefined;
-      if (this.closing || run.parentId && (!parent || !['running', 'waiting'].includes(parent.info.state))) {
+      if (this.closing || run.parentId && (!parent || !['running', 'waiting', 'paused'].includes(parent.info.state))) {
         await this.shutdown(session); this.dispose(session); throw new Error('Parent or profile is stopping.');
       }
       // The finished record stays untouched (and resumable) unless the new one is saved.

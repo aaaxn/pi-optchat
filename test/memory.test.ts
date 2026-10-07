@@ -70,6 +70,26 @@ test('a turn waits for the view to be built, not for merges that bring it under 
   } finally { release(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('progress counts summaries against the largest backlog since it was last empty', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
+  let release = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  // Every 600-byte message needs the compactor, which holds all of them until released.
+  const memory = new Memory(dir, async () => { await gate; return 'summary'; }, () => {});
+  try {
+    assert.deepEqual(memory.progress(), { done: 0, total: 0, retryIn: undefined });
+    memory.append('user', 'a'.repeat(600)); memory.append('user', 'b'.repeat(600));
+    assert.deepEqual(memory.progress(), { done: 0, total: 3, retryIn: undefined }, 'two leaves and their parent');
+    memory.append('user', 'c'.repeat(600)); memory.append('user', 'd'.repeat(600));
+    assert.equal(memory.progress().total, 7, 'grows with the backlog');
+    release();
+    await memory.settle(AbortSignal.timeout(2000), true);
+    assert.deepEqual(memory.progress(), { done: 0, total: 0, retryIn: undefined }, 'resets when the backlog drains');
+    memory.append('user', 'e'.repeat(600));
+    assert.deepEqual(memory.progress(), { done: 0, total: 1, retryIn: undefined }, 'a new backlog starts from zero');
+  } finally { release(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('torn final line is reported and the next append remains readable', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')); let memory = new Memory(dir, async () => 'summary');
   memory.append('user', 'first'); await memory.close();

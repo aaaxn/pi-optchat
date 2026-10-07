@@ -89,6 +89,8 @@ export class Memory {
   /** Per level, every node below this index is built. */
   private readonly low: number[] = [];
   private retryTimer?: ReturnType<typeof setTimeout>;
+  /** The most summaries owed at once since none were last owed. */
+  private peak = 0;
   private scheduled = false;
   private stopped = false;
   lastError?: string;
@@ -134,17 +136,23 @@ export class Memory {
   get pending() { return this.root.length - this.leaves; }
   get active() { return this.busy.size; }
   get size() { return this.viewBytes; }
-  /** The view tiles the log in order, so a binary search finds the part covering a position. */
-  private visible(part: Part) {
-    const at = start(part);
+  /** Summaries built out of the backlog since it was last empty, and when the next failed one is retried. */
+  progress(now = Date.now()) {
+    const due = Math.min(...[...this.retryAt.values()].filter(t => t > now));
+    return { done: this.peak - this.owed(), total: this.peak, retryIn: Number.isFinite(due) ? due - now : undefined };
+  }
+  private owed() { return this.expectedNodes() - this.tree.size; }
+  onChange(listener: () => void) { this.events.on('change', listener); return () => { this.events.off('change', listener); }; }
+  /** The view line covering message `at`. The view tiles the log in order, so a binary search finds it. */
+  covering(at: number): Part | undefined {
     for (let lo = 0, hi = this.view.length - 1; lo <= hi;) {
       const mid = (lo + hi) >> 1, p = this.view[mid];
       if (end(p) <= at) lo = mid + 1;
       else if (start(p) > at) hi = mid - 1;
-      else return p.l === part.l && p.i === part.i;
+      else return p;
     }
-    return false;
   }
+  private visible(part: Part) { const p = this.covering(start(part)); return p?.l === part.l && p.i === part.i; }
   private fit(total = this.root.length) {
     while (this.viewBytes > this.budget) {
       let best = -1; let due = -Infinity;
@@ -160,6 +168,8 @@ export class Memory {
       this.viewBytes += this.partBytes(parent) - this.partBytes(a) - this.partBytes(b);
       this.view.splice(best, 2, parent);
     }
+    const owed = this.owed();
+    this.peak = owed > 0 ? Math.max(this.peak, owed) : 0;
     this.events.emit('change');
   }
   private schedule() {
@@ -243,6 +253,17 @@ export class Memory {
       if (!node) throw new Error('This range is not summarized yet.');
       return `${start(part)}+${2 ** l}|${flat(node.text)}`;
     }).join('\n');
+  }
+  /** Original messages containing `text`, ignoring case, newest first, older than message `before`. Never summaries,
+   * nor the logged zoom/search calls and results, which only copy memory. */
+  search(text: string, before = this.root.length) {
+    const needle = text.toLowerCase(), hits: Entry[] = [];
+    for (let i = Math.min(before, this.root.length) - 1; i >= 0; i--) {
+      const entry = this.root[i];
+      if ((entry.kind === 'tool' || entry.kind === 'echo') && /^(zoom|search)[ :]/.test(entry.text)) continue;
+      if (entry.text.toLowerCase().includes(needle)) hits.push(entry);
+    }
+    return hits;
   }
   date(id: number) {
     if (!Number.isSafeInteger(id) || !this.root[id]) throw new Error(`No message ${id}.`);
