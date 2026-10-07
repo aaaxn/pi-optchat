@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type ImageContent, type TextContent, type UserMessage } from '@earendil-works/pi-ai';
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { asUser, buildContext, PREVIOUS_EXCHANGE, previousExchange, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from '../src/transcript.ts';
@@ -223,20 +223,25 @@ test('real Pi lifecycle retains one exchange across tool calls and resume, witho
   }
 });
 
-test('another extension\'s custom message becomes a user message tagged with its type, images kept; OptChat\'s reports stay as they are', () => {
-  const custom = (customType: string, content: string | (TextContent | ImageContent)[]) => asUser({ role: 'custom', customType, content, display: true, timestamp: 1 });
+test('another extension\'s shown custom message becomes a user message tagged with its type, images kept; reports and hidden messages stay as they are', () => {
+  const custom = (customType: string, content: string | (TextContent | ImageContent)[], display = true) => asUser({ role: 'custom', customType, content, display, timestamp: 1 });
   const image = { type: 'image' as const, data: 'image-bytes', mimeType: 'image/png' };
   assert.deepEqual(custom('subagent_status', 'Subagent status: Scout stalled.'), { role: 'user', content: '[subagent_status] Subagent status: Scout stalled.', timestamp: 1 });
   assert.deepEqual(custom('screenshot', [{ type: 'text', text: 'Screenshot attached.' }, image]), { role: 'user', content: [{ type: 'text', text: '[screenshot] Screenshot attached.' }, image], timestamp: 1 });
   assert.deepEqual(custom('screenshot', [image]), { role: 'user', content: [{ type: 'text', text: '[screenshot]' }, image], timestamp: 1 });
   assert.deepEqual(custom(REPORT_TYPE, '[8964a512] Done.'), { role: 'user', content: '[8964a512] Done.', timestamp: 1 });
+  assert.deepEqual(custom('plan-mode-context', '[PLAN MODE ACTIVE]', false), { role: 'custom', customType: 'plan-mode-context', content: '[PLAN MODE ACTIVE]', display: false, timestamp: 1 });
 });
 
-test('another extension\'s custom message starts a turn as a user message, and memory and the previous exchange keep it', async () => {
+test('another extension\'s shown custom message starts a turn and stays in memory; context it hides and injects each turn reaches the model but not memory', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-custom-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = dir;
   const captured: Context['messages'][] = [];
+  // As Pi's plan-mode example extension injects its instructions with every prompt while plan mode is on.
+  const plan = '[PLAN MODE ACTIVE]\nYou are in plan mode.';
+  let planning = false;
+  const planMode = (pi: ExtensionAPI) => pi.on('before_agent_start', () => planning ? { message: { customType: 'plan-mode-context', content: plan, display: false } } : undefined);
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {
     createProfile('fixture');
@@ -259,7 +264,7 @@ test('another extension\'s custom message starts a turn as a user message, and m
     });
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
     const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
-      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat, planMode] });
     await loader.reload();
     const manager = SessionManager.inMemory(dir);
     manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
@@ -281,6 +286,12 @@ test('another extension\'s custom message starts a turn as a user message, and m
     const main = join(dir, 'profiles', 'fixture', 'main');
     const log = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n').map(line => JSON.parse(line)));
     assert.ok(log.some(entry => entry.kind === 'user' && entry.text === tagged));
+    planning = true;
+    await session.prompt('Plan the change.');
+    assert.ok(captured.at(-1)!.some(m => m.role === 'user' && textContent(m.content) === plan));
+    const after = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n').map(line => JSON.parse(line)));
+    assert.ok(after.some(entry => entry.kind === 'user' && entry.text === 'Plan the change.'));
+    assert.ok(!after.some(entry => entry.kind === 'user' && entry.text.includes('PLAN MODE')));
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;

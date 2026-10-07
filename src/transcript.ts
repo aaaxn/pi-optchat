@@ -25,15 +25,19 @@ export function typedText(content: unknown) {
   const text = textContent(content, false);
   return { text, bare: text.replace(/\n\n\[Image[ :][^\n]*\](?:\n\[Image[ :][^\n]*\])*$/, '') };
 }
-/** Pi's convertToLlm sends every custom message, another extension's too, to the model as a user message. Another
- * extension's starts with "[customType] ", as the recipe marks background work, so the compactor never takes it for the user's words. */
+/** Pi's convertToLlm sends every custom message to the model as a user message. A shown one is part of the chat, so it
+ * becomes a user message here too; another extension's starts with "[customType] ", as the recipe marks background work, so
+ * the compactor never takes it for the user's words. A hidden one (display false), such as context an extension injects
+ * each turn, stays custom: the model still sees it, and memory and the replay leave it out. */
 export function asUser(message: AgentMessage): AgentMessage {
-  if (message.role !== 'custom') return message;
-  const { content, customType } = message, tag = `[${customType}] `;
-  return { role: 'user', timestamp: message.timestamp, content: customType === REPORT_TYPE ? content
-    : typeof content === 'string' ? tag + content
-    : content[0]?.type === 'text' ? [{ ...content[0], text: tag + content[0].text }, ...content.slice(1)]
-    : [{ type: 'text', text: tag.trimEnd() }, ...content] };
+  if (message.role !== 'custom' || !message.display) return message;
+  const { content, customType, timestamp } = message;
+  if (customType === REPORT_TYPE) return { role: 'user', content, timestamp };
+  const tag = `[${customType}] `;
+  if (typeof content === 'string') return { role: 'user', content: tag + content, timestamp };
+  const [first, ...rest] = content;
+  if (first?.type === 'text') return { role: 'user', content: [{ ...first, text: tag + first.text }, ...rest], timestamp };
+  return { role: 'user', content: [{ type: 'text', text: tag.trimEnd() }, ...content], timestamp };
 }
 export function logMessage(memory: Memory, message: AgentMessage, receipt?: string) {
   const date = new Date(message.timestamp).toISOString();
