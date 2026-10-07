@@ -28,7 +28,7 @@ export function typedText(content: unknown) {
 /** Pi's convertToLlm sends every custom message, another extension's too, to the model as a user message. */
 export function asUser(message: AgentMessage): AgentMessage {
   if (message.role !== 'custom') return message;
-  return { role: 'user', content: textContent(message.content), timestamp: message.timestamp };
+  return { role: 'user', content: message.content, timestamp: message.timestamp };
 }
 export function logMessage(memory: Memory, message: AgentMessage, receipt?: string) {
   const date = new Date(message.timestamp).toISOString();

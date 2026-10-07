@@ -8,7 +8,7 @@ import { createAssistantMessageEventStream, type AssistantMessage, type Context,
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
-import { buildContext, PREVIOUS_EXCHANGE, previousExchange, RUN_BOUNDARY, textContent, typedText } from '../src/transcript.ts';
+import { asUser, buildContext, PREVIOUS_EXCHANGE, previousExchange, RUN_BOUNDARY, textContent, typedText } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 
@@ -221,6 +221,11 @@ test('real Pi lifecycle retains one exchange across tool calls and resume, witho
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('a custom message keeps its images when it becomes a user message', () => {
+  const content = [{ type: 'text' as const, text: 'Screenshot attached.' }, { type: 'image' as const, data: 'image-bytes', mimeType: 'image/png' }];
+  assert.deepEqual(asUser({ role: 'custom', customType: 'screenshot', content, display: true, timestamp: 1 }), { role: 'user', content, timestamp: 1 });
 });
 
 test('another extension\'s custom message starts a turn as a user message, and memory and the previous exchange keep it', async () => {
