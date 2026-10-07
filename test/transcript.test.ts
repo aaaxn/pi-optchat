@@ -4,11 +4,11 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { createAssistantMessageEventStream, type AssistantMessage, type Context, type UserMessage } from '@earendil-works/pi-ai';
+import { createAssistantMessageEventStream, type AssistantMessage, type Context, type ImageContent, type TextContent, type UserMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
-import { asUser, buildContext, PREVIOUS_EXCHANGE, previousExchange, RUN_BOUNDARY, textContent, typedText } from '../src/transcript.ts';
+import { asUser, buildContext, PREVIOUS_EXCHANGE, previousExchange, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 
@@ -223,9 +223,13 @@ test('real Pi lifecycle retains one exchange across tool calls and resume, witho
   }
 });
 
-test('a custom message keeps its images when it becomes a user message', () => {
-  const content = [{ type: 'text' as const, text: 'Screenshot attached.' }, { type: 'image' as const, data: 'image-bytes', mimeType: 'image/png' }];
-  assert.deepEqual(asUser({ role: 'custom', customType: 'screenshot', content, display: true, timestamp: 1 }), { role: 'user', content, timestamp: 1 });
+test('another extension\'s custom message becomes a user message tagged with its type, images kept; OptChat\'s reports stay as they are', () => {
+  const custom = (customType: string, content: string | (TextContent | ImageContent)[]) => asUser({ role: 'custom', customType, content, display: true, timestamp: 1 });
+  const image = { type: 'image' as const, data: 'image-bytes', mimeType: 'image/png' };
+  assert.deepEqual(custom('subagent_status', 'Subagent status: Scout stalled.'), { role: 'user', content: '[subagent_status] Subagent status: Scout stalled.', timestamp: 1 });
+  assert.deepEqual(custom('screenshot', [{ type: 'text', text: 'Screenshot attached.' }, image]), { role: 'user', content: [{ type: 'text', text: '[screenshot] Screenshot attached.' }, image], timestamp: 1 });
+  assert.deepEqual(custom('screenshot', [image]), { role: 'user', content: [{ type: 'text', text: '[screenshot]' }, image], timestamp: 1 });
+  assert.deepEqual(custom(REPORT_TYPE, '[8964a512] Done.'), { role: 'user', content: '[8964a512] Done.', timestamp: 1 });
 });
 
 test('another extension\'s custom message starts a turn as a user message, and memory and the previous exchange keep it', async () => {
@@ -267,15 +271,16 @@ test('another extension\'s custom message starts a turn as a user message, and m
     const result = 'Sub-agent "Scout" finished: found three files.';
     await session.sendCustomMessage({ customType: 'subagent_result', content: result, display: true }, { triggerTurn: true, deliverAs: 'steer' });
     await session.agent.waitForIdle();
-    assert.equal(session.getLastAssistantText(), `Answer to: ${result}`);
-    assert.equal(textContent(captured.at(-1)!.at(-1)?.content), result);
+    const tagged = `[subagent_result] ${result}`;
+    assert.equal(session.getLastAssistantText(), `Answer to: ${tagged}`);
+    assert.equal(textContent(captured.at(-1)!.at(-1)?.content), tagged);
     await session.prompt('What did it find?');
     assert.deepEqual(captured.at(-1)!.map(m => m.role), ['user', 'assistant', 'user']);
-    assert.ok(textContent(captured.at(-1)![0].content).endsWith(result));
-    assert.equal(textContent(captured.at(-1)![1].content), `Answer to: ${result}`);
+    assert.ok(textContent(captured.at(-1)![0].content).endsWith(tagged));
+    assert.equal(textContent(captured.at(-1)![1].content), `Answer to: ${tagged}`);
     const main = join(dir, 'profiles', 'fixture', 'main');
     const log = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n').map(line => JSON.parse(line)));
-    assert.ok(log.some(entry => entry.kind === 'user' && entry.text === result));
+    assert.ok(log.some(entry => entry.kind === 'user' && entry.text === tagged));
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;

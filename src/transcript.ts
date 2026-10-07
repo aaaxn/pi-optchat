@@ -25,10 +25,15 @@ export function typedText(content: unknown) {
   const text = textContent(content, false);
   return { text, bare: text.replace(/\n\n\[Image[ :][^\n]*\](?:\n\[Image[ :][^\n]*\])*$/, '') };
 }
-/** Pi's convertToLlm sends every custom message, another extension's too, to the model as a user message. */
+/** Pi's convertToLlm sends every custom message, another extension's too, to the model as a user message. Another
+ * extension's starts with "[customType] ", as the recipe marks background work, so the compactor never takes it for the user's words. */
 export function asUser(message: AgentMessage): AgentMessage {
   if (message.role !== 'custom') return message;
-  return { role: 'user', content: message.content, timestamp: message.timestamp };
+  const { content, customType } = message, tag = `[${customType}] `;
+  return { role: 'user', timestamp: message.timestamp, content: customType === REPORT_TYPE ? content
+    : typeof content === 'string' ? tag + content
+    : content[0]?.type === 'text' ? [{ ...content[0], text: tag + content[0].text }, ...content.slice(1)]
+    : [{ type: 'text', text: tag.trimEnd() }, ...content] };
 }
 export function logMessage(memory: Memory, message: AgentMessage, receipt?: string) {
   const date = new Date(message.timestamp).toISOString();
