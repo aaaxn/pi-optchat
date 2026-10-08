@@ -27,16 +27,17 @@ export function typedText(content: unknown) {
 }
 /** Pi's convertToLlm sends every custom message to the model as a user message. A shown one is part of the chat, so it
  * becomes a user message here too; another extension's starts with "[customType] ", as the recipe marks background work, so
- * the compactor never takes it for the user's words, and its text is capped like a tool result's. A hidden one (display
- * false), such as context an extension injects each turn, stays custom: the model still sees it, and memory and the replay
- * leave it out. */
+ * the compactor never takes it for the user's words. A hidden one (display false), such as context an extension injects
+ * each turn, stays custom: the model still sees it, and memory and the replay leave it out. */
 export function asUser(message: AgentMessage): AgentMessage {
   if (message.role !== 'custom' || !message.display) return message;
   const { content, customType, timestamp } = message;
   if (customType === REPORT_TYPE) return { role: 'user', content, timestamp };
-  const body = textContent(content, false);
-  const text = body ? `[${customType}] ${cap(body)}` : `[${customType}]`;
-  return { role: 'user', content: typeof content === 'string' ? text : [{ type: 'text', text }, ...content.filter(c => c.type === 'image')], timestamp };
+  const tag = `[${customType}] `;
+  if (typeof content === 'string') return { role: 'user', content: tag + content, timestamp };
+  const [first, ...rest] = content;
+  if (first?.type === 'text') return { role: 'user', content: [{ ...first, text: tag + first.text }, ...rest], timestamp };
+  return { role: 'user', content: [{ type: 'text', text: tag.trimEnd() }, ...content], timestamp };
 }
 export function logMessage(memory: Memory, message: AgentMessage, receipt?: string) {
   const date = new Date(message.timestamp).toISOString();
