@@ -87,7 +87,7 @@ const SOURCE = { claude: 'Claude Code', 'claude-memory': 'Claude Code memory', c
 const body = e => { const j = e.origin && e.text.startsWith('[Historical ') ? e.text.indexOf(']\n') : -1; return j < 0 ? e.text : e.text.slice(j + 2); };
 const short = (s, n) => { s = s.replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 function who(e) {
-  if (e.kind === 'user') return /^\[[0-9a-f]{6,}\] /.test(e.text) ? ['Subagent', 'work', 'subagent report'] : ['You', 'you', 'from you'];
+  if (e.kind === 'user') return /^\[[\w.:-]+\] /.test(e.text) ? ['Subagent', 'work', 'subagent report'] : ['You', 'you', 'from you'];
   if (e.kind === 'talk') return ['OptChat', 'talk', 'reply'];
   if (e.kind === 'tool') return ['Tool call', 'tool', 'tool step'];
   if (e.kind === 'echo') return ['Tool result', 'tool', 'tool step'];
